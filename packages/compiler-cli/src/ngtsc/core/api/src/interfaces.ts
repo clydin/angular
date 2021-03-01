@@ -49,6 +49,40 @@ export interface ResourceHost {
    * or `undefined` if this is not an incremental build.
    */
   getModifiedResourceFiles?(): Set<string>|undefined;
+
+  /**
+   * Transform an inline or external resource synchronously or asynchronously. If the host
+   * returns a `Promise`, it is assumed the consumer of the corresponding `Program` will call
+   * `loadNgStructureAsync()`. Returning `Promise` outside `loadNgStructureAsync()` will
+   * cause a diagnostics error or an exception to be thrown.
+   *
+   * @param data The resource data to transform.
+   * @param context Information regarding the resource such as the type and containing file.
+   * @returns The transformed resource data.
+   */
+  transformResource?(data: string, context: ResourceHostContext): Promise<string>|string;
+}
+
+/**
+ * Contextual information used by members of the ResourceHost interface.
+ */
+export interface ResourceHostContext {
+  /**
+   * The type of the component resource.
+   * * Resources referenced via a component's `template` or `templateUrl` properties are of type
+   * `template`.
+   * * Resources referenced via a component's `styles` or `styleUrls` properties are of
+   * type `style`.
+   */
+  readonly type: 'template'|'style';
+  /**
+   * The absolute path to the resource file. If the resource is inline, the value will be undefined.
+   */
+  readonly resourceFile?: string;
+  /**
+   * The absolute path to the file that contains the resource or reference to the resource.
+   */
+  readonly containingFile: string;
 }
 
 /**

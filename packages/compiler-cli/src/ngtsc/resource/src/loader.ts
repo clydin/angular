@@ -8,7 +8,7 @@
 
 import * as ts from 'typescript';
 
-import {ResourceLoader} from '../../annotations';
+import {ResourceLoader, ResourceLoaderContext} from '../../annotations';
 import {NgCompilerAdapter} from '../../core/api';
 import {AbsoluteFsPath, join, PathSegment} from '../../file_system';
 import {RequiredDelegations} from '../../util/src/typescript';
@@ -62,11 +62,12 @@ export class AdapterResourceLoader implements ResourceLoader {
    * `load()` method.
    *
    * @param resolvedUrl The url (resolved by a call to `resolve()`) of the resource to preload.
+   * @param context Information about the resource such as the type and containing file.
    * @returns A Promise that is resolved once the resource has been loaded or `undefined` if the
    * file has already been loaded.
    * @throws An Error if pre-loading is not available.
    */
-  preload(resolvedUrl: string): Promise<void>|undefined {
+  preload(resolvedUrl: string, context: ResourceLoaderContext): Promise<void>|undefined {
     if (!this.adapter.readResource) {
       throw new Error(
           'HostResourceLoader: the CompilerHost provided does not support pre-loading resources.');
@@ -77,7 +78,20 @@ export class AdapterResourceLoader implements ResourceLoader {
       return this.fetching.get(resolvedUrl);
     }
 
-    const result = this.adapter.readResource(resolvedUrl);
+    let result = this.adapter.readResource(resolvedUrl);
+
+    if (this.adapter.transformResource) {
+      const resourceContext = {
+        ...context,
+        resourceFile: resolvedUrl,
+      };
+      if (typeof result === 'string') {
+        result = this.adapter.transformResource(result, resourceContext);
+      } else {
+        result = result.then(str => this.adapter.transformResource!(str, resourceContext));
+      }
+    }
+
     if (typeof result === 'string') {
       this.cache.set(resolvedUrl, result);
       return undefined;
@@ -97,17 +111,28 @@ export class AdapterResourceLoader implements ResourceLoader {
    * The contents of the resource may have been cached by a previous call to `preload()`.
    *
    * @param resolvedUrl The url (resolved by a call to `resolve()`) of the resource to load.
+   * @param context Information about the resource such as the type and containing file.
    * @returns The contents of the resource.
    */
-  load(resolvedUrl: string): string {
+  load(resolvedUrl: string, context: ResourceLoaderContext): string {
     if (this.cache.has(resolvedUrl)) {
       return this.cache.get(resolvedUrl)!;
     }
 
-    const result = this.adapter.readResource ? this.adapter.readResource(resolvedUrl) :
-                                               this.adapter.readFile(resolvedUrl);
+    let result = this.adapter.readResource ? this.adapter.readResource(resolvedUrl) :
+                                             this.adapter.readFile(resolvedUrl);
     if (typeof result !== 'string') {
       throw new Error(`HostResourceLoader: loader(${resolvedUrl}) returned a Promise`);
+    }
+    if (this.adapter.transformResource) {
+      const resourceContext = {
+        ...context,
+        resourceFile: resolvedUrl,
+      };
+      result = this.adapter.transformResource(result, resourceContext);
+      if (typeof result !== 'string') {
+        throw new Error(`HostResourceLoader: transform(${resolvedUrl}) returned a Promise`);
+      }
     }
     this.cache.set(resolvedUrl, result);
     return result;

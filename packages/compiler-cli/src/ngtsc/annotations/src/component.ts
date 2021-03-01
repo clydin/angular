@@ -188,7 +188,7 @@ export class ComponentDecoratorHandler implements
          resourceType: ResourceTypeForDiagnostics): Promise<void>|undefined => {
           const resourceUrl =
               this._resolveResourceOrThrow(styleUrl, containingFile, nodeForError, resourceType);
-          return this.resourceLoader.preload(resourceUrl);
+          return this.resourceLoader.preload(resourceUrl, {type: 'style', containingFile});
         };
 
     // A Promise that waits for the template and all <link>ed styles within it to be preloaded.
@@ -322,7 +322,7 @@ export class ComponentDecoratorHandler implements
           ResourceTypeForDiagnostics.StylesheetFromTemplate;
       const resourceUrl = this._resolveResourceOrThrow(
           styleUrl.url, containingFile, styleUrl.nodeForError, resourceType);
-      const resourceStr = this.resourceLoader.load(resourceUrl);
+      const resourceStr = this.resourceLoader.load(resourceUrl, {type: 'style', containingFile});
 
       styles.push(resourceStr);
       if (this.depTracker !== null) {
@@ -683,7 +683,8 @@ export class ComponentDecoratorHandler implements
             ResourceTypeForDiagnostics.StylesheetFromTemplate;
         const resolvedStyleUrl = this._resolveResourceOrThrow(
             styleUrl.url, containingFile, styleUrl.nodeForError, resourceType);
-        const styleText = this.resourceLoader.load(resolvedStyleUrl);
+        const styleText =
+            this.resourceLoader.load(resolvedStyleUrl, {type: 'style', containingFile});
         styles.push(styleText);
       }
     }
@@ -871,7 +872,8 @@ export class ComponentDecoratorHandler implements
       }
       const resourceUrl = this._resolveResourceOrThrow(
           templateUrl, containingFile, templateUrlExpr, ResourceTypeForDiagnostics.Template);
-      const templatePromise = this.resourceLoader.preload(resourceUrl);
+      const templatePromise =
+          this.resourceLoader.preload(resourceUrl, {type: 'template', containingFile});
 
       // If the preload worked, then actually load and parse the template, and wait for any style
       // URLs to resolve.
@@ -937,10 +939,13 @@ export class ComponentDecoratorHandler implements
         declaration: template,
       };
     } else {
-      const templateStr = this.resourceLoader.load(template.resolvedTemplateUrl);
+      const containingSourceFile = node.getSourceFile();
+      const templateStr = this.resourceLoader.load(
+          template.resolvedTemplateUrl,
+          {type: 'template', containingFile: containingSourceFile.fileName});
       if (this.depTracker !== null) {
         this.depTracker.addResourceDependency(
-            node.getSourceFile(), absoluteFrom(template.resolvedTemplateUrl));
+            containingSourceFile, absoluteFrom(template.resolvedTemplateUrl));
       }
 
       return {

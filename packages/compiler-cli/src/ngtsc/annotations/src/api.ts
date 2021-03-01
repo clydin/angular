@@ -41,7 +41,7 @@ export interface ResourceLoader {
    * if the file has already been loaded.
    * @throws An Error if pre-loading is not available.
    */
-  preload(resolvedUrl: string): Promise<void>|undefined;
+  preload(resolvedUrl: string, context: ResourceLoaderContext): Promise<void>|undefined;
 
   /**
    * Load the resource at the given url, synchronously.
@@ -51,5 +51,14 @@ export interface ResourceLoader {
    * @param resolvedUrl The url (resolved by a call to `resolve()`) of the resource to load.
    * @returns The contents of the resource.
    */
-  load(resolvedUrl: string): string;
+  load(resolvedUrl: string, context: ResourceLoaderContext): string;
+
+  preprocessInline(data: string, context: ResourceLoaderContext): Promise<void>;
+
+  processInline(data: string, context: ResourceLoaderContext): string;
+}
+
+export interface ResourceLoaderContext {
+  type: 'style'|'template';
+  containingFile: string;
 }
