@@ -17,6 +17,12 @@ import * as i18n from './i18n_ast';
 let textEncoder: TextEncoder|undefined;
 
 /**
+ * A lazily created DigestVisitor instance for converting i18n Messages into bytes for the
+ * digest algorithms.
+ */
+let digestVisitor: DigestVisitor|undefined;
+
+/**
  * Return the message id or compute it using the XLIFF1 digest.
  */
 export function digest(message: i18n.Message): string {
@@ -27,7 +33,16 @@ export function digest(message: i18n.Message): string {
  * Compute the message id using the XLIFF1 digest.
  */
 export function computeDigest(message: i18n.Message): string {
-  return sha1(serializeNodes(message.nodes).join('') + `[${message.meaning}]`);
+  digestVisitor ??= new DigestVisitor();
+
+  const context = new DigestVisitorContext(true);
+  for (const node of message.nodes) {
+    node.visit(digestVisitor, context);
+  }
+  context.insertString(`[${message.meaning}]`);
+
+  // Temporary workaround for testing
+  return sha1(new TextDecoder().decode(context.result));
 }
 
 /**
@@ -41,9 +56,41 @@ export function decimalDigest(message: i18n.Message): string {
  * Compute the message id using the XLIFF2/XMB/$localize digest.
  */
 export function computeDecimalDigest(message: i18n.Message): string {
-  const visitor = new _SerializerIgnoreIcuExpVisitor();
-  const parts = message.nodes.map(a => a.visit(visitor, null));
-  return computeMsgId(parts.join(''), message.meaning);
+  digestVisitor ??= new DigestVisitor();
+
+  const context = new DigestVisitorContext(false);
+  for (const node of message.nodes) {
+    node.visit(digestVisitor, context);
+  }
+
+  return computeMsgId(context.result, message.meaning);
+}
+
+class DigestVisitorContext {
+  private serializationBuffer = new Uint8Array(16384);
+  private bufferIndex = 0;
+
+  constructor(public readonly includeIcuExpressions: boolean) {}
+
+  get result(): Uint8Array {
+    return this.serializationBuffer.subarray(0, this.bufferIndex);
+  }
+
+  insertByte(value: number): void {
+    this.serializationBuffer[this.bufferIndex++] = value;
+  }
+
+  insertSeparator(): void {
+    this.serializationBuffer[this.bufferIndex++] = 0x2c; // ,
+    this.serializationBuffer[this.bufferIndex++] = 0x20; // space
+  }
+
+  insertString(value: string): void {
+    textEncoder ??= new TextEncoder();
+    const result = textEncoder.encodeInto(value, this.serializationBuffer.subarray(this.bufferIndex));
+    // TODO: Check why `written` can be undefined
+    this.bufferIndex += result.written ?? 0;
+  }
 }
 
 /**
@@ -53,56 +100,124 @@ export function computeDecimalDigest(message: i18n.Message): string {
  *
  * @internal
  */
-class _SerializerVisitor implements i18n.Visitor {
-  visitText(text: i18n.Text, context: any): any {
-    return text.value;
+class DigestVisitor implements i18n.Visitor {
+  visitText(text: i18n.Text, context: DigestVisitorContext): void {
+    context.insertString(text.value);
   }
 
-  visitContainer(container: i18n.Container, context: any): any {
-    return `[${container.children.map(child => child.visit(this)).join(', ')}]`;
+  visitContainer(container: i18n.Container, context: DigestVisitorContext): void {
+    context.insertByte(0x5b); // [
+
+    const last = container.children.length - 1;
+    for (let i = 0; i <= last; ++i) {
+      container.children[i].visit(this, context);
+      // Add separator to all entries except the last
+      if (i < last) {
+        context.insertSeparator();
+      }
+    }
+
+    context.insertByte(0x5d); // ]
   }
 
-  visitIcu(icu: i18n.Icu, context: any): any {
-    const strCases =
-        Object.keys(icu.cases).map((k: string) => `${k} {${icu.cases[k].visit(this)}}`);
-    return `{${icu.expression}, ${icu.type}, ${strCases.join(', ')}}`;
+  visitIcu(icu: i18n.Icu, context: DigestVisitorContext): void {
+    context.insertByte(0x7b); // {
+
+    if (context.includeIcuExpressions) {
+      context.insertString(icu.expression);
+      context.insertSeparator();
+    }
+    context.insertString(icu.type);
+    context.insertSeparator();
+
+    const entries = Object.entries(icu.cases);
+    const last = entries.length - 1;
+    for (let i = 0; i <= last; ++i) {
+      const [key, value] = entries[i];
+
+      context.insertString(key);
+      context.insertByte(0x20) // space
+      context.insertByte(0x7b); // {
+      value.visit(this, context);
+      context.insertByte(0x7d); // }
+      // Add separator to all entries except the last
+      if (i < last) {
+        context.insertSeparator();
+      }
+    }
+
+    context.insertByte(0x7d); // }
   }
 
-  visitTagPlaceholder(ph: i18n.TagPlaceholder, context: any): any {
-    return ph.isVoid ?
-        `<ph tag name="${ph.startName}"/>` :
-        `<ph tag name="${ph.startName}">${
-            ph.children.map(child => child.visit(this)).join(', ')}</ph name="${ph.closeName}">`;
+  visitTagPlaceholder(ph: i18n.TagPlaceholder, context: DigestVisitorContext): any {
+    // TODO: start could be turned into an inline byte array constant
+    context.insertString('<ph tag name="');
+    context.insertString(ph.startName);
+    context.insertByte(0x22); // "
+
+    if (ph.isVoid) {
+      context.insertByte(0x2f); // /
+      context.insertByte(0x3e); // >
+
+      return;
+    }
+
+    context.insertByte(0x3e); // >
+
+    const last = ph.children.length - 1;
+    for (let i = 0; i <= last; ++i) {
+      ph.children[i].visit(this, context);
+      // Add separator to all entries except the last
+      if (i < last) {
+        context.insertSeparator();
+      }
+    }
+
+    context.insertString('</ph name="');
+    context.insertString(ph.closeName);
+    context.insertByte(0x22); // "
+    context.insertByte(0x3e); // >
   }
 
-  visitPlaceholder(ph: i18n.Placeholder, context: any): any {
-    return ph.value ? `<ph name="${ph.name}">${ph.value}</ph>` : `<ph name="${ph.name}"/>`;
+  visitPlaceholder(ph: i18n.Placeholder, context: DigestVisitorContext): any {
+    // TODO: start could be turned into an inline byte array constant
+    context.insertString('<ph name="');
+    context.insertString(ph.name);
+    context.insertByte(0x22); // "
+    if (ph.value) {
+      context.insertByte(0x3e); // >
+      context.insertString(ph.value);
+      // TODO: end could be turned into an inline byte array constant
+      context.insertString('</ph>');
+    } else {
+      context.insertByte(0x2f); // /
+      context.insertByte(0x3e); // >
+    }
   }
 
-  visitIcuPlaceholder(ph: i18n.IcuPlaceholder, context?: any): any {
-    return `<ph icu name="${ph.name}">${ph.value.visit(this)}</ph>`;
+  visitIcuPlaceholder(ph: i18n.IcuPlaceholder, context: DigestVisitorContext): any {
+    // TODO: start could be turned into an inline byte array constant
+    context.insertString('<ph icu name="');
+    context.insertString(ph.name);
+    context.insertByte(0x22); // "
+    context.insertByte(0x3e); // >
+    ph.value.visit(this, context);
+    // TODO: end could be turned into an inline byte array constant
+    context.insertString('</ph>');
   }
 }
-
-const serializerVisitor = new _SerializerVisitor();
 
 export function serializeNodes(nodes: i18n.Node[]): string[] {
-  return nodes.map(a => a.visit(serializerVisitor, null));
-}
+  digestVisitor ??= new DigestVisitor();
 
-/**
- * Serialize the i18n ast to something xml-like in order to generate an UID.
- *
- * Ignore the ICU expressions so that message IDs stays identical if only the expression changes.
- *
- * @internal
- */
-class _SerializerIgnoreIcuExpVisitor extends _SerializerVisitor {
-  override visitIcu(icu: i18n.Icu, context: any): any {
-    let strCases = Object.keys(icu.cases).map((k: string) => `${k} {${icu.cases[k].visit(this)}}`);
-    // Do not take the expression into account
-    return `{${icu.type}, ${strCases.join(', ')}}`;
+  const nodeText: string[] = [];
+  for (const node of nodes) {
+    const context = new DigestVisitorContext(true);
+    node.visit(digestVisitor, context);
+    nodeText.push(new TextDecoder().decode(context.result));
   }
+
+  return nodeText;
 }
 
 /**
@@ -190,9 +305,14 @@ function fk(index: number, b: number, c: number, d: number): [number, number] {
  * based on:
  * https://github.com/google/closure-compiler/blob/master/src/com/google/javascript/jscomp/GoogleJsMessageIdGenerator.java
  */
-export function fingerprint(str: string): [number, number] {
-  textEncoder ??= new TextEncoder();
-  const utf8 = textEncoder.encode(str);
+export function fingerprint(str: string|Uint8Array): [number, number] {
+  let utf8;
+  if (typeof str === 'string') {
+    textEncoder ??= new TextEncoder();
+    utf8 = textEncoder.encode(str);
+  } else {
+    utf8 = str;
+  }
   const view = new DataView(utf8.buffer, utf8.byteOffset, utf8.byteLength);
 
   let hi = hash32(view, utf8.length, 0);
@@ -206,7 +326,7 @@ export function fingerprint(str: string): [number, number] {
   return [hi, lo];
 }
 
-export function computeMsgId(msg: string, meaning: string = ''): string {
+export function computeMsgId(msg: string|Uint8Array, meaning: string = ''): string {
   let msgFingerprint = fingerprint(msg);
 
   if (meaning) {
