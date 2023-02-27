@@ -7,7 +7,7 @@
  */
 
 import {createSignalFromFunction, defaultEquals, Signal, ValueEqualityFn} from './api';
-import {Consumer, ConsumerId, consumerPollValueStatus, Edge, nextReactiveId, Producer, producerAccessed, ProducerId, producerNotifyConsumers, setActiveConsumer} from './graph';
+import {Consumer, consumerPollValueStatus, Edge, Producer, producerAccessed, producerNotifyConsumers, setActiveConsumer} from './graph';
 import {WeakRef} from './weak_ref';
 
 /**
@@ -69,10 +69,9 @@ class ComputedImpl<T> implements Producer, Consumer {
    */
   private stale = true;
 
-  readonly id = nextReactiveId();
   readonly ref = new WeakRef(this);
-  readonly producers = new Map<ProducerId, Edge>();
-  readonly consumers = new Map<ConsumerId, Edge>();
+  readonly producers = new Map<WeakRef<Producer>, Edge>();
+  readonly consumers = new Map<WeakRef<Consumer>, Edge>();
   trackingVersion = 0;
   valueVersion = 0;
 

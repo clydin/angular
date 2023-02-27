@@ -6,7 +6,7 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import {Consumer, consumerPollValueStatus, Edge, nextReactiveId, ProducerId, setActiveConsumer} from './graph';
+import {Consumer, consumerPollValueStatus, Edge, Producer, setActiveConsumer} from './graph';
 import {WeakRef} from './weak_ref';
 
 /**
@@ -17,9 +17,8 @@ import {WeakRef} from './weak_ref';
  * provided scheduling operation to coordinate calling `Watch.run()`.
  */
 export class Watch implements Consumer {
-  readonly id = nextReactiveId();
   readonly ref = new WeakRef(this);
-  readonly producers = new Map<ProducerId, Edge>();
+  readonly producers = new Map<WeakRef<Producer>, Edge>();
   trackingVersion = 0;
 
   private dirty = false;
