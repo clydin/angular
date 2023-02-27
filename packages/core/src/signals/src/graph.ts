@@ -10,55 +10,16 @@ import {LinearMap} from './linear_map';
 import {WeakRef} from './weak_ref';
 
 /**
- * Identifier for a `Producer`, which is a branded `number`.
- *
- * Note that `ProducerId` and `ConsumerId` are assigned from the same sequence, so the same `number`
- * will never be used for both.
- *
- * Branding provides additional type safety by ensuring that `ProducerId` and `ConsumerId` are
- * mutually unassignable without a cast. Since several `Map`s are keyed by these IDs, this prevents
- * `ProducerId`s from being inadvertently used to look up `Consumer`s or vice versa.
- */
-export type ProducerId = number&{__producer: true};
-
-/**
- * Identifier for a `Consumer`, which is a branded `number`.
- *
- * Note that `ProducerId` and `ConsumerId` are assigned from the same sequence, so the same `number`
- * will never be used for both.
- *
- * Branding provides additional type safety by ensuring that `ProducerId` and `ConsumerId` are
- * mutually unassignable without a cast. Since several `Map`s are keyed by these IDs, this prevents
- * `ConsumerId`s from being inadvertently used to look up `Producer`s or vice versa.
- */
-export type ConsumerId = number&{__consumer: true};
-
-/**
  * Tracks the currently active reactive context (or `null` if there is no active
  * context).
  */
-let activeConsumer: Consumer|null = null;
-
-/**
- * Counter tracking the next `ProducerId` or `ConsumerId`.
- */
-let _nextReactiveId: number = 0;
-
-/**
- * Get a new `ProducerId` or `ConsumerId`, allocated from the global sequence.
- *
- * The value returned is a type intersection of both branded types, and thus can be assigned to
- * either.
- */
-export function nextReactiveId(): ProducerId&ConsumerId {
-  return (_nextReactiveId++ as ProducerId & ConsumerId);
-}
+let activeConsumer: Consumer | null = null;
 
 /**
  * Set `consumer` as the active reactive context, and return the previous `Consumer`
  * (if any) for later restoration.
  */
-export function setActiveConsumer(consumer: Consumer|null): Consumer|null {
+export function setActiveConsumer(consumer: Consumer | null): Consumer | null {
   const prevConsumer = activeConsumer;
   activeConsumer = consumer;
   return prevConsumer;
@@ -115,13 +76,6 @@ export interface Edge {
  */
 export interface Producer {
   /**
-   * Numeric identifier of this `Producer`.
-   *
-   * May also be used to satisfy the interface for `Consumer`.
-   */
-  readonly id: ProducerId;
-
-  /**
    * A `WeakRef` to this `Producer` instance.
    *
    * An implementer provides this as a cached value to avoid the need to instantiate
@@ -136,7 +90,7 @@ export interface Producer {
    *
    * Used when the produced value changes to notify interested `Consumer`s.
    */
-  readonly consumers: LinearMap<ConsumerId, Edge>;
+  readonly consumers: LinearMap<WeakRef<Consumer>, Edge>;
 
   /**
    * Monotonically increasing counter which increases when the value of this `Producer`
@@ -166,7 +120,7 @@ export function producerNotifyConsumers(producer: Producer): void {
     const consumer = edge.consumerRef.deref();
     if (consumer === undefined || consumer.trackingVersion !== edge.atTrackingVersion) {
       consumers.deleteIndex(i);
-      consumer?.producers.delete(producer.id);
+      consumer?.producers.delete(producer.ref);
       continue;
     }
 
@@ -184,7 +138,7 @@ export function producerAccessed(producer: Producer): void {
   }
 
   // Either create or update the dependency `Edge` in both directions.
-  let edge = activeConsumer.producers.get(producer.id);
+  let edge = activeConsumer.producers.get(producer.ref);
   if (edge === undefined) {
     edge = {
       consumerRef: activeConsumer.ref,
@@ -192,8 +146,8 @@ export function producerAccessed(producer: Producer): void {
       seenValueVersion: producer.valueVersion,
       atTrackingVersion: activeConsumer.trackingVersion,
     };
-    activeConsumer.producers.set(producer.id, edge);
-    producer.consumers.set(activeConsumer.id, edge);
+    activeConsumer.producers.set(producer.ref, edge);
+    producer.consumers.set(activeConsumer.ref, edge);
   } else {
     edge.seenValueVersion = producer.valueVersion;
     edge.atTrackingVersion = activeConsumer.trackingVersion;
@@ -217,6 +171,8 @@ function producerPollStatus(producer: Producer, lastSeenValueVersion: number): b
 
   // At this point, we can trust `producer.valueVersion`.
   return producer.valueVersion !== lastSeenValueVersion;
+
+  return false;
 }
 
 /**
@@ -238,13 +194,6 @@ function producerPollStatus(producer: Producer, lastSeenValueVersion: number): b
  */
 export interface Consumer {
   /**
-   * Numeric identifier of this `Producer`.
-   *
-   * May also be used to satisfy the interface for `Producer`.
-   */
-  readonly id: ConsumerId;
-
-  /**
    * A `WeakRef` to this `Consumer` instance.
    *
    * An implementer provides this as a cached value to avoid the need to instantiate
@@ -260,7 +209,7 @@ export interface Consumer {
    * Used to poll `Producer`s to determine if the `Consumer` has really updated
    * or not.
    */
-  readonly producers: LinearMap<ProducerId, Edge>;
+  readonly producers: LinearMap<WeakRef<Producer>, Edge>;
 
   /**
    * Monotonically increasing counter representing a version of this `Consumer`'s
@@ -290,7 +239,7 @@ export interface Consumer {
 export function consumerPollValueStatus(consumer: Consumer, notifier: Producer|boolean): boolean {
   const producers = consumer.producers;
 
-  let skipProducer: ProducerId|null = null;
+  let skipProducer: WeakRef<Producer>|null = null;
   if (typeof notifier !== 'boolean') {
     // Prioritize checking the producer that was the first to mark us dirty first. This is purely a
     // performance optimization, which contributes in two ways:
@@ -303,7 +252,7 @@ export function consumerPollValueStatus(consumer: Consumer, notifier: Producer|b
     // producers as they may report a change. This is because we only capture a single notifier when
     // there could have been multiple, and because the push-phase does not descend into consumers
     // that have already been marked dirty.
-    const edge = producers.get(notifier.id);
+    const edge = producers.get(notifier.ref);
     if (edge !== undefined) {
       if (edge.atTrackingVersion === consumer.trackingVersion &&
           producerPollStatus(notifier, edge.seenValueVersion)) {
@@ -313,10 +262,10 @@ export function consumerPollValueStatus(consumer: Consumer, notifier: Producer|b
     }
 
     // Skip over the producer we already checked.
-    skipProducer = notifier.id;
+    skipProducer = notifier.ref;
   }
   for (let i = 0, len = producers.length; i < len; i += 2) {
-    const producerId = producers[i] as ProducerId | null;
+    const producerId = producers[i] as WeakRef<Producer> | null;
     if (producerId === skipProducer) {
       continue;
     }
@@ -329,7 +278,7 @@ export function consumerPollValueStatus(consumer: Consumer, notifier: Producer|b
     if (producer === undefined || edge.atTrackingVersion !== consumer.trackingVersion) {
       // This dependency edge is stale, so remove it.
       producers.deleteIndex(i);
-      producer?.consumers.delete(consumer.id);
+      producer?.consumers.delete(consumer.ref);
       continue;
     }
 
