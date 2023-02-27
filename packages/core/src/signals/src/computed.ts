@@ -71,7 +71,6 @@ class ComputedImpl<T> implements Producer, Consumer {
 
   readonly ref = new WeakRef(this);
   readonly producers = new Map<WeakRef<Producer>, Edge>();
-  readonly consumers = new Map<WeakRef<Consumer>, Edge>();
   trackingVersion = 0;
   valueVersion = 0;
 

@@ -53,6 +53,9 @@ export interface Edge {
    * semantically changed.
    */
   seenValueVersion: number;
+
+  previousConsumer?: Edge;
+  nextConsumer?: Edge;
 }
 
 /**
@@ -84,12 +87,7 @@ export interface Producer {
    */
   readonly ref: WeakRef<Producer>;
 
-  /**
-   * A map of dependency `Edge`s to `Consumer`s, keyed by the `ConsumerId`.
-   *
-   * Used when the produced value changes to notify interested `Consumer`s.
-   */
-  readonly consumers: Map<WeakRef<Consumer>, Edge>;
+  firstConsumer?: Edge;
 
   /**
    * Monotonically increasing counter which increases when the value of this `Producer`
@@ -110,15 +108,27 @@ export interface Producer {
  * Notify all `Consumer`s of the given `Producer` that its value may have changed.
  */
 export function producerNotifyConsumers(producer: Producer): void {
-  for (const edge of producer.consumers.values()) {
+  let edge = producer.firstConsumer;
+  while (edge) {
+    const nextEdge = edge.nextConsumer;
+
     const consumer = edge.consumerRef.deref();
     if (consumer === undefined || consumer.trackingVersion !== edge.atTrackingVersion) {
-      producer.consumers.delete(edge.consumerRef);
+      // Remove
+      if (edge.previousConsumer) {
+        edge.previousConsumer.nextConsumer = nextEdge;
+      } else {
+        producer.firstConsumer = nextEdge;
+      }
+      if (nextEdge) {
+        nextEdge.previousConsumer = edge.previousConsumer;
+      }
       consumer?.producers.delete(producer.ref);
-      continue;
+    } else {
+      consumer.notify();
     }
 
-    consumer.notify();
+    edge = nextEdge;
   }
 }
 
@@ -141,7 +151,11 @@ export function producerAccessed(producer: Producer): void {
       atTrackingVersion: activeConsumer.trackingVersion,
     };
     activeConsumer.producers.set(producer.ref, edge);
-    producer.consumers.set(activeConsumer.ref, edge);
+    if (producer.firstConsumer) {
+      edge.nextConsumer = producer.firstConsumer;
+      producer.firstConsumer.previousConsumer = edge;
+    }
+    producer.firstConsumer = edge;
   } else {
     edge.seenValueVersion = producer.valueVersion;
     edge.atTrackingVersion = activeConsumer.trackingVersion;
@@ -232,12 +246,17 @@ export interface Consumer {
  */
 export function consumerPollValueStatus(consumer: Consumer): boolean {
   for (const edge of consumer.producers.values()) {
-    const producer = edge.producerRef.deref();
+    if (edge.atTrackingVersion !== consumer.trackingVersion) {
+      // This dependency edge is stale, so remove it.
+      // The producer side, if present, will be removed when it next notifies consumers.
+      consumer.producers.delete(edge.producerRef);
+      continue;
+    }
 
-    if (producer === undefined || edge.atTrackingVersion !== consumer.trackingVersion) {
+    const producer = edge.producerRef.deref();
+    if (producer === undefined) {
       // This dependency edge is stale, so remove it.
       consumer.producers.delete(edge.producerRef);
-      producer?.consumers.delete(consumer.ref);
       continue;
     }
 

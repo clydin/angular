@@ -41,7 +41,6 @@ class SettableSignalImpl<T> implements Producer {
   constructor(private value: T, private equal: ValueEqualityFn<T>) {}
 
   readonly ref = new WeakRef(this);
-  readonly consumers = new Map<WeakRef<Consumer>, Edge>();
   valueVersion = 0;
 
   checkForChangedValue(): void {

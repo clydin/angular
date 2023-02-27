@@ -101,6 +101,6 @@ function runWatchQueue(): void {
     watch.run();
   }
 
-  watchQueuePromise!.resolveFn();
+  watchQueuePromise?.resolveFn();
   watchQueuePromise = null;
 }
