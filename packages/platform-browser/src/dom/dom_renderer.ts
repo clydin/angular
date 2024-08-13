@@ -460,6 +460,7 @@ class ShadowDomRenderer extends DefaultDomRenderer2 {
 
 class NoneEncapsulationDomRenderer extends DefaultDomRenderer2 {
   private readonly styles: string[];
+  private readonly styleUrls?: string[];
 
   constructor(
     eventManager: EventManager,
@@ -472,11 +473,32 @@ class NoneEncapsulationDomRenderer extends DefaultDomRenderer2 {
     compId?: string,
   ) {
     super(eventManager, doc, ngZone, platformIsServer);
-    this.styles = compId ? shimStylesContent(compId, component.styles) : component.styles;
+
+    this.styles = [];
+    for (const style of component.styles) {
+      // TODO: Replace with a new RenderType2 property check instead of content checks.
+      //       This should eventually be all external or all internal.
+      if (style.endsWith('.css') && !style.includes('{') && !style.includes('@')) {
+        // External style URL
+        this.styleUrls ??= [];
+        this.styleUrls.push(compId ? `${style}?c=${encodeURIComponent(compId)}` : style);
+      } else {
+        // Inline style content
+        this.styles.push(...(compId ? shimStylesContent(compId, [style]) : [style]));
+      }
+    }
+    // this.styles = compId ? shimStylesContent(compId, component.styles) : component.styles;
+    // // Add component ID search parameter `c` to support server-side style content shimming
+    // this.styleUrls = compId
+    //   ? component.externalStyles?.map((value) => value + '?c=' + encodeURIComponent(compId))
+    //   : component.externalStyles;
   }
 
   applyStyles(): void {
     this.sharedStylesHost.addStyles(this.styles);
+    if (this.styleUrls) {
+      this.sharedStylesHost.addExternalStyles(this.styleUrls);
+    }
   }
 
   override destroy(): void {
@@ -485,6 +507,9 @@ class NoneEncapsulationDomRenderer extends DefaultDomRenderer2 {
     }
 
     this.sharedStylesHost.removeStyles(this.styles);
+    if (this.styleUrls) {
+      this.sharedStylesHost.removeExternalStyles(this.styleUrls);
+    }
   }
 }
 
