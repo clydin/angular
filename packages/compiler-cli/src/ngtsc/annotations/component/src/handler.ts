@@ -674,7 +674,7 @@ export class ComponentDecoratorHandler
       }
     }
     const templateResource = template.declaration.isInline
-      ? {path: null, expression: component.get('template')!}
+      ? {path: null, expression: template.declaration.expression}
       : {
           path: absoluteFrom(template.declaration.resolvedTemplateUrl),
           expression: template.sourceMapping.node,
@@ -706,20 +706,15 @@ export class ComponentDecoratorHandler
         }
         const resourceStr = this.resourceLoader.load(resourceUrl);
         styles.push(resourceStr);
-        if (this.depTracker !== null) {
-          this.depTracker.addResourceDependency(node.getSourceFile(), absoluteFrom(resourceUrl));
-        }
+        this.depTracker?.addResourceDependency(node.getSourceFile(), absoluteFrom(resourceUrl));
       } catch {
-        if (this.depTracker !== null) {
-          // The analysis of this file cannot be re-used if one of the style URLs could
-          // not be resolved or loaded. Future builds should re-analyze and re-attempt
-          // resolution/loading.
-          this.depTracker.recordDependencyAnalysisFailure(node.getSourceFile());
-        }
+        // The analysis of this file cannot be re-used if one of the style URLs could
+        // not be resolved or loaded. Future builds should re-analyze and re-attempt
+        // resolution/loading.
+        this.depTracker?.recordDependencyAnalysisFailure(node.getSourceFile());
 
-        if (diagnostics === undefined) {
-          diagnostics = [];
-        }
+        diagnostics ??= [];
+
         const resourceType =
           styleUrl.source === ResourceTypeForDiagnostics.StylesheetFromDecorator
             ? ResourceTypeForDiagnostics.StylesheetFromDecorator
@@ -763,12 +758,10 @@ export class ComponentDecoratorHandler
         throw new Error('Inline resource processing requires asynchronous preanalyze.');
       }
 
-      if (component.has('styles')) {
-        const litStyles = parseDirectiveStyles(component, this.evaluator, this.compilationMode);
-        if (litStyles !== null) {
-          inlineStyles = [...litStyles];
-          styles.push(...litStyles);
-        }
+      const litStyles = parseDirectiveStyles(component, this.evaluator, this.compilationMode);
+      if (litStyles !== null) {
+        inlineStyles = [...litStyles];
+        styles.push(...litStyles);
       }
 
       if (template.styles.length > 0) {
