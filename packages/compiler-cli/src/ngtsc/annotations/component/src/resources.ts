@@ -428,6 +428,7 @@ export function preloadAndParseTemplate(
       const resourceUrl = resourceLoader.resolve(templateUrl, containingFile);
       const templatePromise = resourceLoader.preload(resourceUrl, {
         type: 'template',
+        origin: 'metadata',
         containingFile,
       });
 

@@ -326,14 +326,21 @@ export class ComponentDecoratorHandler
     const component = reflectObjectLiteral(meta);
     const containingFile = node.getSourceFile().fileName;
 
-    const resolveStyleUrl = (styleUrl: string): Promise<void> | undefined => {
+    const resolveStyleUrl = async (
+      styleUrl: string,
+      base: string,
+      origin: 'metadata' | 'template',
+    ): Promise<void> => {
       try {
-        const resourceUrl = this.resourceLoader.resolve(styleUrl, containingFile);
-        return this.resourceLoader.preload(resourceUrl, {type: 'style', containingFile});
+        const resourceUrl = this.resourceLoader.resolve(styleUrl, base);
+        await this.resourceLoader.preload(resourceUrl, {
+          type: 'style',
+          origin,
+          containingFile: base,
+        });
       } catch {
         // Don't worry about failures to preload. We can handle this problem during analysis by
         // producing a diagnostic.
-        return undefined;
       }
     };
 
@@ -379,7 +386,11 @@ export class ComponentDecoratorHandler
       if (rawStyles?.length) {
         styles = await Promise.all(
           rawStyles.map((style) =>
-            this.resourceLoader.preprocessInline(style, {type: 'style', containingFile}),
+            this.resourceLoader.preprocessInline(style, {
+              type: 'style',
+              origin: 'metadata',
+              containingFile,
+            }),
           ),
         );
       }
@@ -390,6 +401,7 @@ export class ComponentDecoratorHandler
             templateInfo.templateStyles.map((style) =>
               this.resourceLoader.preprocessInline(style, {
                 type: 'style',
+                origin: 'template',
                 containingFile: templateInfo.templateUrl ?? containingFile,
               }),
             ),
@@ -401,8 +413,12 @@ export class ComponentDecoratorHandler
 
       // Wait for both the template and all styleUrl resources to resolve.
       await Promise.all([
-        ...componentStyleUrls.map((styleUrl) => resolveStyleUrl(styleUrl.url)),
-        ...templateInfo.templateStyleUrls.map((url) => resolveStyleUrl(url)),
+        ...componentStyleUrls.map((styleUrl) =>
+          resolveStyleUrl(styleUrl.url, containingFile, 'metadata'),
+        ),
+        ...templateInfo.templateStyleUrls.map((url) =>
+          resolveStyleUrl(url, templateInfo.templateUrl ?? containingFile, 'template'),
+        ),
       ]);
     });
   }

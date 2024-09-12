@@ -84,6 +84,21 @@ export interface ResourceLoaderContext {
   type: 'style' | 'template';
 
   /**
+   * The source for the referenced component resource. A resource can either be referenced from
+   * the metadata of a component (e.g., the `@Component` decorator) or from within the component
+   * template itself via a `style`/`link` element.
+   */
+  origin: 'metadata' | 'template';
+
+  /**
+   * The language for the content of the component resource. If present, a resource loader
+   * implementation may use the value as a suggestion as to how to process the content of the
+   * resource. A resource loader implementation may have its own logic and is not required to
+   * use the value.
+   */
+  language?: string;
+
+  /**
    * The absolute path to the file that contains the resource or reference to the resource.
    */
   containingFile: string;
