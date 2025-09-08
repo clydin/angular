@@ -31,11 +31,8 @@ Use this pattern as the primary method for applying common validation logic in y
 
 - **`required()`:** A built-in validator that ensures a field has a value.
 - **`minLength(number)`:** A built-in validator that ensures a string's length is at least the specified minimum.
-- **`maxLength(number)`:** A built-in validator that ensures a string's length does not exceed the specified maximum.
-- **`min(number)`:** A built-in validator that ensures a numeric value is at least the specified minimum.
-- **`max(number)`:** A built-in validator that ensures a numeric value does not exceed the specified maximum.
 - **`email()`:** A built-in validator that checks if a string is in a valid email format.
-- **`pattern(RegExp)`:** A built-in validator that checks if a string matches a given regular expression.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -47,7 +44,7 @@ This file defines the component's logic, including the data model and a validati
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema } from '@angular/forms/signals';
+import { form, schema, submit } from '@angular/forms/signals';
 import { required, minLength, maxLength, min, max, email, pattern } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
@@ -92,10 +89,10 @@ export class UserSettingsComponent {
 
   settingsForm = form(this.settingsModel, settingsSchema);
 
-  handleSubmit() {
-    if (this.settingsForm().valid()) {
+  async handleSubmit() {
+    await submit(this.settingsForm, async () => {
       this.submitted.emit(this.settingsForm().value());
-    }
+    });
   }
 }
 ```
@@ -105,16 +102,18 @@ export class UserSettingsComponent {
 This file provides the template for the form, displaying specific error messages for each potential validation failure.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>Username:</label>
     <input type="text" [control]="settingsForm.username" />
     @if (settingsForm.username().errors().length > 0) {
       <div class="errors">
         @for (error of settingsForm.username().errors()) {
-          @if (error.required) { <p>Username is required.</p> }
-          @if (error.minLength) { <p>Username must be at least 3 characters.</p> }
-          @if (error.maxLength) { <p>Username cannot exceed 20 characters.</p> }
+          @switch (error.kind) {
+            @case ('required') { <p>Username is required.</p> }
+            @case ('minLength') { <p>Username must be at least 3 characters.</p> }
+            @case ('maxLength') { <p>Username cannot exceed 20 characters.</p> }
+          }
         }
       </div>
     }
@@ -126,9 +125,11 @@ This file provides the template for the form, displaying specific error messages
     @if (settingsForm.age().errors().length > 0) {
       <div class="errors">
         @for (error of settingsForm.age().errors()) {
-          @if (error.required) { <p>Age is required.</p> }
-          @if (error.min) { <p>You must be at least 18 years old.</p> }
-          @if (error.max) { <p>Age cannot be more than 100.</p> }
+          @switch (error.kind) {
+            @case ('required') { <p>Age is required.</p> }
+            @case ('min') { <p>You must be at least 18 years old.</p> }
+            @case ('max') { <p>Age cannot be more than 100.</p> }
+          }
         }
       </div>
     }
@@ -140,8 +141,10 @@ This file provides the template for the form, displaying specific error messages
     @if (settingsForm.email().errors().length > 0) {
       <div class="errors">
         @for (error of settingsForm.email().errors()) {
-          @if (error.required) { <p>Email is required.</p> }
-          @if (error.email) { <p>Please enter a valid email address.</p> }
+          @switch (error.kind) {
+            @case ('required') { <p>Email is required.</p> }
+            @case ('email') { <p>Please enter a valid email address.</p> }
+          }
         }
       </div>
     }
@@ -153,7 +156,9 @@ This file provides the template for the form, displaying specific error messages
     @if (settingsForm.website().errors().length > 0) {
       <div class="errors">
         @for (error of settingsForm.website().errors()) {
-          @if (error.pattern) { <p>Please enter a valid URL.</p> }
+          @switch (error.kind) {
+            @case ('pattern') { <p>Please enter a valid URL.</p> }
+          }
         }
       </div>
     }
@@ -166,7 +171,8 @@ This file provides the template for the form, displaying specific error messages
 ## Usage Notes
 
 - All built-in validators are imported directly from `@angular/forms`.
-- Each validator is a function that takes the `FieldPath` as its first argument, and optional configuration (like the minimum length) as the second.
+- The native `(submit)` event on the `<form>` element is bound to the `handleSubmit` method. It's important to call `$event.preventDefault()` to prevent a full page reload.
+- The `handleSubmit` method uses the `submit()` helper to manage the submission process.
 
 ## How to Use This Example
 

@@ -1,6 +1,6 @@
 ---
 title: Signal Form with Cross-Field Validation
-summary: Implements a cross-field validator by applying a validator to one field that reactively depends on the value of another field.
+summary: Implements a cross-field validator by applying a validator to one field that reactively depends on the value of another field using `valueOf`.
 keywords:
   - signal forms
   - form
@@ -29,7 +29,7 @@ Use this pattern when the validity of one form field depends on the value of ano
 
 - **`validate()`:** A function used within a schema to add a validator to a specific field.
 - **`valueOf()`:** A function available in the validation context that allows you to reactively access the value of any other field in the form.
-- **`valid` signal:** A signal on the `FieldState` that is `true` only when the field and all its descendants are valid.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -41,7 +41,7 @@ This file defines the component's logic. The schema applies a validator to `conf
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validate } from '@angular/forms/signals';
+import { form, schema, validate, requiredError, minLengthError, customError, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface PasswordForm {
@@ -51,14 +51,14 @@ export interface PasswordForm {
 
 const passwordSchema = schema<PasswordForm>((passwordForm) => {
   validate(passwordForm.password, ({value}) => {
-    if (value === '') return { required: true };
-    if (value.length < 8) return { minLength: { requiredLength: 8, actualLength: value.length } };
+    if (value() === '') return requiredError();
+    if (value().length < 8) return minLengthError(8);
     return null;
   });
 
   validate(passwordForm.confirmPassword, ({value, valueOf}) => {
-    if (value !== valueOf(passwordForm.password)) {
-      return { mismatch: true };
+    if (value() !== valueOf(passwordForm.password)) {
+      return customError({ kind: 'mismatch' });
     }
     return null;
   });
@@ -81,10 +81,10 @@ export class PasswordFormComponent {
 
   passwordForm = form(this.passwordModel, passwordSchema);
 
-  handleSubmit() {
-    if (this.passwordForm().valid()) {
+  async handleSubmit() {
+    await submit(this.passwordForm, async () => {
       this.submitted.emit(this.passwordForm().value());
-    }
+    });
   }
 }
 ```
@@ -94,7 +94,7 @@ export class PasswordFormComponent {
 This file provides the template for the form, showing how to display errors for both field-level and cross-field validation rules.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Password:
@@ -103,8 +103,10 @@ This file provides the template for the form, showing how to display errors for 
     @if (passwordForm.password().errors().length > 0) {
       <div class="errors">
         @for (error of passwordForm.password().errors()) {
-          @if (error.required) { <p>Password is required.</p> }
-          @if (error.minLength) { <p>Password must be at least 8 characters long.</p> }
+          @switch (error.kind) {
+            @case ('required') { <p>Password is required.</p> }
+            @case ('minLength') { <p>Password must be at least 8 characters long.</p> }
+          }
         }
       </div>
     }
@@ -117,7 +119,9 @@ This file provides the template for the form, showing how to display errors for 
     @if (passwordForm.confirmPassword().errors().length > 0) {
       <div class="errors">
         @for (error of passwordForm.confirmPassword().errors()) {
-          @if (error.mismatch) { <p>Passwords do not match.</p> }
+          @switch (error.kind) {
+            @case ('mismatch') { <p>Passwords do not match.</p> }
+          }
         }
       </div>
     }
@@ -129,8 +133,8 @@ This file provides the template for the form, showing how to display errors for 
 
 ## Usage Notes
 
-- The submit button is disabled based on the form's `valid` signal (`[disabled]="!passwordForm().valid()"`).
-- The `handleSubmit` method checks `this.passwordForm().valid()` as a safeguard before emitting the data.
+- The native `(submit)` event on the `<form>` element is bound to the `handleSubmit` method. It's important to call `$event.preventDefault()` to prevent a full page reload.
+- The `handleSubmit` method uses the `submit()` helper to manage the submission process.
 
 ## How to Use This Example
 

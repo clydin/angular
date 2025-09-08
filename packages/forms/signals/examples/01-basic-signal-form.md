@@ -25,8 +25,7 @@ Use this pattern as the starting point for any new form in an Angular applicatio
 
 - **`form()`:** A function that creates a `Field` representing the form, taking a `WritableSignal` as the data model.
 - **`[control]` directive:** Binds a `Field` from your component to a native HTML input element, creating a two-way data binding.
-- **`@Output()`:** A decorator used to emit custom events from a child component to a parent component.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -38,7 +37,7 @@ This file defines the component's logic, including the signal-based data model a
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form } from '@angular/forms/signals';
+import { form, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface UserProfile {
@@ -65,20 +64,22 @@ export class UserProfileComponent {
 
   profileForm = form(this.profileModel);
 
-  handleSubmit() {
+  async handleSubmit() {
     // For this basic example, we assume the form is always valid for submission.
     // See the validation example for how to handle invalid forms.
-    this.submitted.emit(this.profileForm().value());
+    await submit(this.profileForm, async () => {
+      this.submitted.emit(this.profileForm().value());
+    });
   }
 }
 ```
 
 ### user-profile.component.html
 
-The template is wrapped in a `<form>` tag with an `(ngSubmit)` event and a submit button.
+The template is wrapped in a `<form>` tag with a `(submit)` event and a submit button.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       First Name:
@@ -109,8 +110,8 @@ The template is wrapped in a `<form>` tag with an `(ngSubmit)` event and a submi
 
 - The `[control]` directive automatically handles the two-way data binding between the input element and the corresponding `Field` in the `profileForm`.
 - The `profileForm()` signal gives you access to the `FieldState`, which includes the form's `value` as a signal.
-- The `(ngSubmit)` event on the `<form>` element is bound to the `handleSubmit` method in the component.
-- When `handleSubmit` is called, it emits the current form value through the `submitted` output property.
+- The native `(submit)` event on the `<form>` element is bound to the `handleSubmit` method. It's important to call `$event.preventDefault()` to prevent a full page reload.
+- The `handleSubmit` method uses the `submit()` helper to manage the submission process.
 
 ## How to Use This Example
 
