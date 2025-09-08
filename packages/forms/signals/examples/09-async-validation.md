@@ -1,6 +1,6 @@
 ---
 title: Signal Form with Asynchronous Validation
-summary: Implements an asynchronous validator on a signal form field using `validateAsync` to check for a unique username against a mock backend service.
+summary: Implements an asynchronous validator on a signal form field using `validateHttp` to check for a unique username against a mock backend endpoint.
 keywords:
   - signal forms
   - form
@@ -8,10 +8,11 @@ keywords:
   - validation
   - asynchronous validation
   - async
-  - validateAsync
+  - validateHttp
   - schema
 required_packages:
   - '@angular/forms'
+  - '@angular/common'
 related_concepts:
   - 'signals'
 ---
@@ -22,68 +23,37 @@ The purpose of this pattern is to perform validation that requires an asynchrono
 
 ## When to Use
 
-Use this pattern for validation that requires a network request, a debounce, or any other asynchronous operation. It allows the UI to remain responsive while the validation is in progress and provides feedback to the user once the validation is complete. This is the modern, signal-based equivalent of `AsyncValidator` in `ReactiveFormsModule`.
+Use this pattern for validation that requires a network request. The `validateHttp` function provides a convenient, built-in way to integrate backend validation. It allows the UI to remain responsive while the validation is in progress and provides feedback to the user once the validation is complete. This is the modern, signal-based equivalent of `AsyncValidator` in `ReactiveFormsModule`.
 
 ## Key Concepts
 
-- **`validateAsync()`:** A function used within a schema to add an asynchronous validator to a field.
-- **Asynchronous Validator Function:** A function that returns a `Promise` which resolves to an error object or `null`.
+- **`validateHttp()`:** A function used within a schema to add an asynchronous validator to a field based on an HTTP request.
 - **`pending` signal:** A signal on the `FieldState` that is `true` while an asynchronous validator is running.
 
 ## Example Files
 
-This example consists of a standalone component and a service that work together to perform asynchronous validation.
-
-### username.service.ts
-
-This file defines a mock service that simulates an asynchronous check for username uniqueness.
-
-```typescript
-import { Injectable } from '@angular/core';
-import { of } from 'rxjs';
-import { delay } from 'rxjs/operators';
-
-@Injectable({ providedIn: 'root' })
-export class UsernameService {
-  private existingUsernames = ['admin', 'user', 'test'];
-
-  isUsernameTaken(username: string): Promise<boolean> {
-    return of(this.existingUsernames.includes(username.toLowerCase()))
-      .pipe(delay(500))
-      .toPromise();
-  }
-}
-```
+This example consists of a standalone component that performs asynchronous validation against a mock API endpoint.
 
 ### registration-form.component.ts
 
-This file defines the component's logic, including a schema that uses `validateAsync` to call the username service.
+This file defines the component's logic, including a schema that uses `validateHttp` to call the username validation endpoint.
 
 ```typescript
-import { Component, inject, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validate, validateAsync } from '@angular/forms/signals';
+import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
+import { form, schema, required, validateHttp } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
-import { UsernameService } from './username.service';
 
 export interface RegistrationForm {
   username: string;
 }
 
-const createRegistrationSchema = (usernameService: UsernameService) => {
-  return schema<RegistrationForm>((registrationForm) => {
-    validate(registrationForm.username, ({value}) => {
-      if (value === '') {
-        return { required: true };
-      }
-      return null;
-    });
-    validateAsync(registrationForm.username, async ({value}) => {
-      if (value === '') return null;
-      const isTaken = await usernameService.isUsernameTaken(value);
-      return isTaken ? { unique: true } : null;
-    });
+const registrationSchema = schema<RegistrationForm>((form) => {
+  required(form.username);
+  validateHttp(form.username, {
+    request: ({value}) => `/api/username-check?username=${value}`,
+    errors: (result: {isTaken: boolean}) => (result.isTaken ? {unique: true} : null),
   });
-};
+});
 
 @Component({
   selector: 'app-registration-form',
@@ -95,13 +65,11 @@ const createRegistrationSchema = (usernameService: UsernameService) => {
 export class RegistrationFormComponent {
   @Output() submitted = new EventEmitter<RegistrationForm>();
 
-  private usernameService = inject(UsernameService);
-
   registrationModel = signal<RegistrationForm>({
     username: '',
   });
 
-  registrationForm = form(this.registrationModel, createRegistrationSchema(this.usernameService));
+  registrationForm = form(this.registrationModel, registrationSchema);
 
   handleSubmit() {
     if (this.registrationForm().valid()) {
@@ -144,15 +112,47 @@ This file provides the template for the form, showing how to display feedback wh
 
 ## Usage Notes
 
-- The **`validateAsync`** function takes a `FieldPath` and an async validator function.
-- The async validator function should return a `Promise` that resolves with the validation result.
+- The **`validateHttp`** function takes a `FieldPath` and an options object.
+- The `request` function returns the URL for the validation request.
+- The `errors` function maps the HTTP response to a validation error.
 - The **`pending`** signal on the field state (`registrationForm.username().pending()`) can be used to show a loading indicator to the user.
 
 ## How to Use This Example
 
-The parent component listens for the `(submitted)` event to receive the strongly-typed form data.
+To run this example, you need to provide an `HttpClient` and a mock backend that can respond to the validation requests.
 
 ```typescript
+// in app.config.ts
+import { ApplicationConfig } from '@angular/core';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+
+// A simple interceptor to mock the backend
+const mockApiInterceptor = (req, next) => {
+  const controller = TestBed.inject(HttpTestingController);
+  const existingUsernames = ['admin', 'user', 'test'];
+
+  if (req.url.startsWith('/api/username-check')) {
+    const username = req.params.get('username');
+    const isTaken = existingUsernames.includes(username?.toLowerCase() ?? '');
+    
+    // Use a timeout to simulate network latency
+    setTimeout(() => {
+      const mockReq = controller.expectOne(req.urlWithParams);
+      mockReq.flush({ isTaken });
+    }, 500);
+  }
+  
+  return next(req);
+};
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideHttpClient(withInterceptors([mockApiInterceptor])),
+    provideHttpClientTesting(),
+  ],
+};
+
 // in app.component.ts
 import { Component } from '@angular/core';
 import { JsonPipe } from '@angular/common';

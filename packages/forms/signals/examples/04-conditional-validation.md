@@ -1,13 +1,13 @@
 ---
 title: Signal Form with Conditional Validation
-summary: Applies a validator to a signal form field only when a specific condition is met by using the `validateWhen` function.
+summary: Applies a validator to a signal form field only when a specific condition is met by using the `applyWhen` function.
 keywords:
   - signal forms
   - form
   - control
   - validation
   - conditional validation
-  - validateWhen
+  - applyWhen
   - schema
   - submit
 required_packages:
@@ -26,7 +26,7 @@ Use this pattern when a validation rule for one field depends on the state of an
 
 ## Key Concepts
 
-- **`validateWhen()`:** A function used within a schema to apply a validator conditionally.
+- **`applyWhen()`:** A function used within a schema to apply a validator conditionally.
 - **`valid` signal:** A signal on the `FieldState` that is `true` only when the field and all its descendants are valid.
 - **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
 
@@ -36,11 +36,11 @@ This example consists of a standalone component that defines and manages a conta
 
 ### contact-form.component.ts
 
-This file defines the component's logic, including a schema that uses `validateWhen` to apply a validator conditionally.
+This file defines the component's logic, including a schema that uses `applyWhen` to apply a validator conditionally.
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validateWhen } from '@angular/forms/signals';
+import { form, schema, applyWhen, required } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface ContactForm {
@@ -49,10 +49,10 @@ export interface ContactForm {
 }
 
 const contactSchema = schema<ContactForm>((contactForm) => {
-  validateWhen(
-    contactForm.email,
-    ({valueOf}) => valueOf(contactForm.subscribe),
-    ({value}) => (value === '' ? { required: true } : null)
+  applyWhen(
+    contactForm,
+    ({value}) => value().subscribe,
+    schema((form) => required(form.email))
   );
 });
 

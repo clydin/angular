@@ -1,13 +1,13 @@
 ---
 title: Signal Form with Cross-Field Validation
-summary: Implements a cross-field validator using `validateTree` to ensure two fields in a signal form are consistent with each other.
+summary: Implements a cross-field validator by applying a validator to one field that reactively depends on the value of another field.
 keywords:
   - signal forms
   - form
   - control
   - validation
   - cross-field validation
-  - validateTree
+  - valueOf
   - schema
   - minLength
   - submit
@@ -23,13 +23,13 @@ The purpose of this pattern is to implement validation logic that depends on the
 
 ## When to Use
 
-Use this pattern when the validity of one form field depends on the value of another. This is common in registration forms, password change forms, and any form where two fields must be consistent with each other. `validateTree` is the signal-based equivalent of a cross-field validator on a `FormGroup` in `ReactiveFormsModule`.
+Use this pattern when the validity of one form field depends on the value of another. This is common in registration forms, password change forms, and any form where two fields must be consistent with each other. The recommended approach is to apply a validator to the field where the error should be reported (e.g., `confirmPassword`) and use the `valueOf` function in the validation context to reactively get the value of the other field it depends on (e.g., `password`).
 
 ## Key Concepts
 
-- **`validateTree()`:** A function used within a schema to add a validator to a form group or the entire form.
+- **`validate()`:** A function used within a schema to add a validator to a specific field.
+- **`valueOf()`:** A function available in the validation context that allows you to reactively access the value of any other field in the form.
 - **`valid` signal:** A signal on the `FieldState` that is `true` only when the field and all its descendants are valid.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
 
 ## Example Files
 
@@ -37,11 +37,11 @@ This example consists of a standalone component that defines and manages a passw
 
 ### password-form.component.ts
 
-This file defines the component's logic, including a schema with a `validateTree` function for cross-field validation.
+This file defines the component's logic. The schema applies a validator to `confirmPassword` that compares its value to the value of the `password` field.
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validate, validateTree } from '@angular/forms/signals';
+import { form, schema, validate } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface PasswordForm {
@@ -56,9 +56,9 @@ const passwordSchema = schema<PasswordForm>((passwordForm) => {
     return null;
   });
 
-  validateTree(passwordForm, ({value, fieldOf}) => {
-    if (value.password !== value.confirmPassword) {
-      return [{ field: fieldOf(passwordForm.confirmPassword), error: { mismatch: true } }];
+  validate(passwordForm.confirmPassword, ({value, valueOf}) => {
+    if (value !== valueOf(passwordForm.password)) {
+      return { mismatch: true };
     }
     return null;
   });
