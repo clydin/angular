@@ -26,8 +26,7 @@ Use this pattern when you have a form where the user can add or remove multiple 
 ## Key Concepts
 
 - **`applyEach()`:** A function used within a schema to apply a sub-schema to each element of an array field.
-- **`valid` signal:** A signal on the `FieldState` that is `true` only when the field and all its descendants are valid.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -39,7 +38,7 @@ This file defines the component's logic, including methods to dynamically add an
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, applyEach, validate } from '@angular/forms/signals';
+import { form, schema, applyEach, validate, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface Question {
@@ -53,11 +52,11 @@ export interface SurveyForm {
 }
 
 const questionSchema = schema<Question>((question) => {
-  validate(question.text, ({value}) => (value === '' ? { required: true } : null));
+  validate(question.text, ({value}) => (value() === '' ? { required: true } : null));
 });
 
 const surveySchema = schema<SurveyForm>((survey) => {
-  validate(survey.title, ({value}) => (value === '' ? { required: true } : null));
+  validate(survey.title, ({value}) => (value() === '' ? { required: true } : null));
   applyEach(survey.questions, questionSchema);
 });
 
@@ -81,21 +80,21 @@ export class SurveyFormComponent {
   addQuestion() {
     this.surveyModel.update(survey => {
       survey.questions.push({ text: '', required: false });
-      return survey;
+      return { ...survey };
     });
   }
 
   removeQuestion(index: number) {
     this.surveyModel.update(survey => {
       survey.questions.splice(index, 1);
-      return survey;
+      return { ...survey };
     });
   }
 
-  handleSubmit() {
-    if (this.surveyForm().valid()) {
+  async handleSubmit() {
+    await submit(this.surveyForm, async () => {
       this.submitted.emit(this.surveyForm().value());
-    }
+    });
   }
 }
 ```
@@ -105,7 +104,7 @@ export class SurveyFormComponent {
 This file provides the template for the form, using an `@for` block to render the fields for each question in the array.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Survey Title:

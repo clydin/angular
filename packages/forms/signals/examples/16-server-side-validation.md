@@ -103,7 +103,7 @@ export class RegistrationFormComponent {
 This file provides the template, which disables the submit button based on the form's `submitting` and `valid` states.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>Username:</label>
     <input type="text" [control]="registrationForm.username" />

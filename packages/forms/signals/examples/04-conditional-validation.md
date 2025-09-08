@@ -27,8 +27,7 @@ Use this pattern when a validation rule for one field depends on the state of an
 ## Key Concepts
 
 - **`applyWhen()`:** A function used within a schema to apply a validator conditionally.
-- **`valid` signal:** A signal on the `FieldState` that is `true` only when the field and all its descendants are valid.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -40,7 +39,7 @@ This file defines the component's logic, including a schema that uses `applyWhen
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, applyWhen, required } from '@angular/forms/signals';
+import { form, schema, applyWhen, required, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface ContactForm {
@@ -73,10 +72,10 @@ export class ContactFormComponent {
 
   contactForm = form(this.contactModel, contactSchema);
 
-  handleSubmit() {
-    if (this.contactForm().valid()) {
+  async handleSubmit() {
+    await submit(this.contactForm, async () => {
       this.submitted.emit(this.contactForm().value());
-    }
+    });
   }
 }
 ```
@@ -86,7 +85,7 @@ export class ContactFormComponent {
 This file provides the template for the form, which includes a checkbox that controls the validation of another field.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       <input type="checkbox" [control]="contactForm.subscribe" />
@@ -112,8 +111,8 @@ This file provides the template for the form, which includes a checkbox that con
 
 ## Usage Notes
 
-- The submit button is disabled based on the form's `valid` signal (`[disabled]="!contactForm().valid()"`).
-- The `handleSubmit` method checks `this.contactForm().valid()` as a safeguard before emitting the data.
+- The native `(submit)` event on the `<form>` element is bound to the `handleSubmit` method. It's important to call `$event.preventDefault()` to prevent a full page reload.
+- The `handleSubmit` method uses the `submit()` helper to manage the submission process.
 
 ## How to Use This Example
 

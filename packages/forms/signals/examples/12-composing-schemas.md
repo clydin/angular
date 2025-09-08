@@ -26,7 +26,7 @@ Use this pattern for any form that has distinct subgroups of fields, such as a u
 
 - **`schema()`:** A function used to define a modular piece of validation logic for a specific data structure.
 - **`apply()`:** A function used within a parent schema to import and apply a smaller, predefined schema to a specific field group.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -46,11 +46,11 @@ export interface Address {
 }
 
 export const addressSchema = schema<Address>((address) => {
-  validate(address.street, ({value}) => value === '' ? { required: true } : null);
-  validate(address.city, ({value}) => value === '' ? { required: true } : null);
+  validate(address.street, ({value}) => value() === '' ? { required: true } : null);
+  validate(address.city, ({value}) => value() === '' ? { required: true } : null);
   validate(address.zipCode, ({value}) => {
-    if (value === '') return { required: true };
-    if (!/^\d{5}$/.test(value)) return { pattern: true };
+    if (value() === '') return { required: true };
+    if (!/^\d{5}$/.test(value())) return { pattern: true };
     return null;
   });
 });
@@ -62,7 +62,7 @@ This file defines the main component, which imports the address schema and compo
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validate, apply } from '@angular/forms/signals';
+import { form, schema, validate, apply, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 import { Address, addressSchema } from './address.schema';
 
@@ -72,7 +72,7 @@ export interface RegistrationForm {
 }
 
 const registrationSchema = schema<RegistrationForm>((form) => {
-  validate(form.name, ({value}) => value === '' ? { required: true } : null);
+  validate(form.name, ({value}) => value() === '' ? { required: true } : null);
   
   // Apply the external address schema to the address field.
   apply(form.address, addressSchema);
@@ -99,10 +99,10 @@ export class RegistrationFormComponent {
 
   registrationForm = form(this.registrationModel, registrationSchema);
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 }
 ```
@@ -112,7 +112,7 @@ export class RegistrationFormComponent {
 This file provides the template for the form, binding to the nested fields of the composed schema.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Name:

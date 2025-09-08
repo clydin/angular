@@ -28,6 +28,7 @@ Use this pattern when you have an existing validation schema from a compatible l
 
 - **`validateStandardSchema()`:** A function that integrates a `Standard-Schema` compatible validator (like a Zod schema) into your signal form's validation process.
 - **Zod:** A popular TypeScript-first schema declaration and validation library. Zod schemas can be used with signal forms via a compatibility layer.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -58,7 +59,7 @@ This file defines the component, which imports the Zod schema and applies it to 
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validateStandardSchema } from '@angular/forms/signals';
+import { form, schema, validateStandardSchema, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 import { registrationZodSchema, RegistrationData } from './registration.zod';
 
@@ -84,10 +85,10 @@ export class RegistrationFormComponent {
 
   registrationForm = form(this.registrationModel, registrationSchema);
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 }
 ```
@@ -97,7 +98,7 @@ export class RegistrationFormComponent {
 This file provides the template for the form, displaying validation errors that originate from the Zod schema.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>Email:</label>
     <input type="email" [control]="registrationForm.email" />

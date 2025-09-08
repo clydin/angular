@@ -27,7 +27,7 @@ Use this pattern when you have validation logic that is shared across multiple f
 
 - **Validator Function:** A standalone function that takes configuration (like a minimum length) and returns a validation function that can be used with `validate`.
 - **Factory Pattern:** Using a higher-order function to create and configure your validator, making it highly reusable.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -42,8 +42,8 @@ import { FieldValidator } from '@angular/forms/signals';
 
 export function minLength(minLength: number): FieldValidator<string> {
   return ({value}) => {
-    if (value.length < minLength) {
-      return { minLength: { requiredLength: minLength, actualLength: value.length } };
+    if (value().length < minLength) {
+      return { minLength: { requiredLength: minLength, actualLength: value().length } };
     }
     return null;
   };
@@ -56,7 +56,7 @@ This file defines the component's logic, importing and using the reusable valida
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validate } from '@angular/forms/signals';
+import { form, schema, validate, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 import { minLength } from './custom-validators';
 
@@ -87,10 +87,10 @@ export class RegistrationFormComponent {
 
   registrationForm = form(this.registrationModel, registrationSchema);
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 }
 ```
@@ -100,7 +100,7 @@ export class RegistrationFormComponent {
 This file provides the template for the form, displaying detailed error messages from the custom validator.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Username:

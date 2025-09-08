@@ -29,7 +29,7 @@ Apply these patterns to all forms in a production application. Accessibility is 
 - **`[class.invalid]`:** A class binding that applies a CSS class to an element when a condition is true. Here, it's used to style an input based on its validity.
 - **`touched` signal:** A signal on the `FieldState` that becomes `true` when the user has interacted with and then left the form control. This is useful for showing errors only after the user has had a chance to enter a value.
 - **`aria-describedby`:** An accessibility attribute that links a form control to the element that describes it, such as an error message. This allows screen readers to announce the error when the user focuses on the invalid input.
-- **`aria-invalid`:** An accessibility attribute that tells screen readers whether an input is currently in an invalid state.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -41,7 +41,7 @@ This file defines the component's logic, focusing on the form's state and valida
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, required, email, minLength } from '@angular/forms/signals';
+import { form, schema, required, email, minLength, submit } from '@angular/forms/signals';
 
 export interface RegistrationForm {
   name: string;
@@ -68,10 +68,10 @@ export class RegistrationFormComponent {
   registrationModel = signal<RegistrationForm>({ name: '', email: '' });
   registrationForm = form(this.registrationModel, registrationSchema);
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 }
 ```
@@ -81,7 +81,7 @@ export class RegistrationFormComponent {
 This file provides the template, enhanced with ARIA attributes and class bindings for stateful styling.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div class="form-field">
     <label for="name-input">Name:</label>
     <input id="name-input" type="text" 

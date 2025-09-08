@@ -24,6 +24,7 @@ Use this pattern when you need to prevent user input in a field without complete
 ## Key Concepts
 
 - **`readonly()`:** A function used within a schema to define the logic that determines whether a field should be readonly. It takes a `FieldPath` and a predicate function.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 - **`readonly` signal:** A signal on the `FieldState` that reflects the field's readonly status, which can be used for attribute binding in the template.
 
 ## Example Files
@@ -35,8 +36,8 @@ This example consists of a standalone component that defines and manages a form 
 This file defines the component's logic, including a schema that uses the `readonly` function to control the state of the shipping address fields.
 
 ```typescript
-import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, readonly } from '@angular/forms/signals';
+import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy, effect } from '@angular/core';
+import { form, schema, readonly, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface AddressForm {
@@ -78,8 +79,10 @@ export class AddressFormComponent {
     });
   }
 
-  handleSubmit() {
-    this.submitted.emit(this.addressForm().value());
+  async handleSubmit() {
+    await submit(this.addressForm, async () => {
+      this.submitted.emit(this.addressForm().value());
+    });
   }
 }
 ```
@@ -89,7 +92,7 @@ export class AddressFormComponent {
 This file provides the template for the form, binding an input's `readonly` attribute to its corresponding field's `readonly` signal.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>Billing Address:</label>
     <input type="text" [control]="addressForm.billingAddress" />

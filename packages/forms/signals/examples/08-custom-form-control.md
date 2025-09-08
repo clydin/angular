@@ -27,7 +27,7 @@ Use this pattern when you have a form input that is more complex than a standard
 
 - **`FormValueControl<T>`:** An interface that custom form control components can implement to integrate with signal forms.
 - **`model()`:** A function from `@angular/core` that creates a two-way bound signal input, used here to implement the `value` property of the `FormValueControl` interface.
-- **`(ngSubmit)`:** An event binding on a `<form>` element that triggers a method when the form is submitted.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -70,7 +70,7 @@ This file defines the parent form component that consumes the custom numeric ste
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form } from '@angular/forms/signals';
+import { form, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 import { NumericStepperComponent } from './numeric-stepper.component';
 
@@ -96,8 +96,10 @@ export class ProductFormComponent {
 
   productForm = form(this.productModel);
 
-  handleSubmit() {
-    this.submitted.emit(this.productForm().value());
+  async handleSubmit() {
+    await submit(this.productForm, async () => {
+      this.submitted.emit(this.productForm().value());
+    });
   }
 }
 ```
@@ -107,7 +109,7 @@ export class ProductFormComponent {
 This file provides the template for the parent form, showing how the `[control]` directive is used on the custom component.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Product Name:

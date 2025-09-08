@@ -24,7 +24,7 @@ Use this pattern when you need to show or hide a form control based on another c
 ## Key Concepts
 
 - **`hidden()`:** A function used within a schema to define the logic that determines whether a field should be hidden. It takes a `FieldPath` and a predicate function.
-- **Predicate Function:** The function passed to `hidden` that returns `true` when the field should be hidden.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 - **`@if` block:** Used in the template to conditionally render the form control based on the field's `hidden` signal.
 
 ## Example Files
@@ -37,7 +37,7 @@ This file defines the component's logic, including a schema that uses the `hidde
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, hidden, required } from '@angular/forms/signals';
+import { form, schema, hidden, required, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface ContactForm {
@@ -70,10 +70,10 @@ export class ContactFormComponent {
 
   contactForm = form(this.contactModel, contactSchema);
 
-  handleSubmit() {
-    if (this.contactForm().valid()) {
+  async handleSubmit() {
+    await submit(this.contactForm, async () => {
       this.submitted.emit(this.contactForm().value());
-    }
+    });
   }
 }
 ```
@@ -83,7 +83,7 @@ export class ContactFormComponent {
 This file provides the template for the form, using an `@if` block to conditionally render a field based on its `hidden` signal.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>Reason for Contact:</label>
     <select [control]="contactForm.reason">

@@ -24,7 +24,7 @@ Use this pattern whenever you need to enable or disable a form control based on 
 ## Key Concepts
 
 - **`disabled()`:** A function used within a schema to define the logic that determines whether a field should be disabled. It takes a `FieldPath` and a predicate function.
-- **Predicate Function:** The function passed to `disabled` that returns `true` when the field should be disabled.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 - **`disabled` signal:** A signal on the `FieldState` that reflects the field's disabled status, which can be used for attribute binding in the template.
 
 ## Example Files
@@ -37,7 +37,7 @@ This file defines the component's logic, including a schema that uses the `disab
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, disabled, required } from '@angular/forms/signals';
+import { form, schema, disabled, required, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface PromoForm {
@@ -70,10 +70,10 @@ export class PromoFormComponent {
 
   promoForm = form(this.promoModel, promoSchema);
 
-  handleSubmit() {
-    if (this.promoForm().valid()) {
+  async handleSubmit() {
+    await submit(this.promoForm, async () => {
       this.submitted.emit(this.promoForm().value());
-    }
+    });
   }
 }
 ```
@@ -83,7 +83,7 @@ export class PromoFormComponent {
 This file provides the template for the form, binding an input's `disabled` attribute to its corresponding field's `disabled` signal.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       <input type="checkbox" [control]="promoForm.hasPromoCode" />

@@ -29,6 +29,7 @@ Use this pattern when you need to compute a new piece of state that is derived f
 - **`AggregateProperty`:** A special kind of property that can receive values from multiple sources within the schema and combine them into a single value.
 - **`listProperty()`:** A factory function that creates an `AggregateProperty` which combines all provided values into an array.
 - **`aggregateProperty()`:** A function used within a schema to contribute a value to an `AggregateProperty` on a specific field.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -55,7 +56,7 @@ This file defines the component's logic, using the custom `warnings` property to
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, required, aggregateProperty } from '@angular/forms/signals';
+import { form, schema, required, aggregateProperty, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 import { warnings, FieldWarning } from './custom-properties';
 
@@ -102,10 +103,10 @@ export class RegistrationFormComponent {
   // We can now read the custom property from the field state.
   passwordWarnings = this.registrationForm.password().property(warnings);
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 }
 ```
@@ -115,7 +116,7 @@ export class RegistrationFormComponent {
 This file provides the template, which reads the custom `warnings` property and displays the messages to the user.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>Username:</label>
     <input type="text" [control]="registrationForm.username" />

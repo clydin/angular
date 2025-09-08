@@ -31,7 +31,7 @@ Use this pattern for any asynchronous validation that is tied to user input, suc
 - **`validateAsync()`:** The function used to add an asynchronous validator.
 - **RxJS `Subject` and `switchMap`:** Used to create an observable stream of user input. `switchMap` is crucial for canceling previous pending requests when new input arrives.
 - **RxJS `debounceTime`:** An operator that waits for a specified period of silence in the observable stream before emitting the latest value.
-- **`pending` signal:** A signal on the `FieldState` that is `true` while async validation is running.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -43,7 +43,7 @@ This file defines the component's logic, using an RxJS `Subject` to debounce use
 
 ```typescript
 import { Component, inject, OnDestroy, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, validate, validateAsync } from '@angular/forms/signals';
+import { form, schema, validate, validateAsync, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 import { UsernameService } from './username.service';
 import { Subject } from 'rxjs';
@@ -78,20 +78,20 @@ export class RegistrationFormComponent implements OnDestroy {
 
   private createSchema() {
     return schema<RegistrationForm>((form) => {
-      validate(form.username, ({value}) => (value === '' ? { required: true } : null));
+      validate(form.username, ({value}) => (value() === '' ? { required: true } : null));
       validateAsync(form.username, async ({value}) => {
-        if (value === '') return null;
-        this.username$.next(value);
+        if (value() === '') return null;
+        this.username$.next(value());
         const isTaken = await firstValueFrom(this.validationResult$);
         return isTaken ? { unique: true } : null;
       });
     });
   }
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 
   ngOnDestroy() {
@@ -106,7 +106,7 @@ export class RegistrationFormComponent implements OnDestroy {
 This file provides the template for the form, showing how to disable the submit button while validation is in progress.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Username:

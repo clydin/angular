@@ -39,7 +39,7 @@ This file defines a standalone login form component with basic validation, servi
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, required, email } from '@angular/forms/signals';
+import { form, schema, required, email, submit } from '@angular/forms/signals';
 
 export interface LoginForm {
   email: string;
@@ -56,7 +56,7 @@ const loginSchema = schema<LoginForm>((form) => {
   selector: 'app-login-form',
   standalone: true,
   template: `
-    <form (ngSubmit)="handleSubmit()">
+    <form (submit)="handleSubmit(); $event.preventDefault()">
       <input type="email" [control]="loginForm.email" />
       <input type="password" [control]="loginForm.password" />
       <button type="submit" [disabled]="!loginForm().valid()">Log In</button>
@@ -70,10 +70,10 @@ export class LoginFormComponent {
   loginModel = signal<LoginForm>({ email: '', password: '' });
   loginForm = form(this.loginModel, loginSchema);
 
-  handleSubmit() {
-    if (this.loginForm().valid()) {
+  async handleSubmit() {
+    await submit(this.loginForm, async () => {
       this.submitted.emit(this.loginForm().value());
-    }
+    });
   }
 }
 ```
@@ -113,7 +113,7 @@ describe('LoginFormComponent', () => {
     fixture.detectChanges();
     
     expect(component.loginForm().valid()).toBe(false);
-    expect(component.loginForm.email().errors().some(e => e.email)).toBe(true);
+    expect(component.loginForm.email().errors().some(e => e.kind === 'email')).toBe(true);
   });
 
   it('should be valid when all fields are filled correctly', () => {
@@ -131,7 +131,7 @@ describe('LoginFormComponent', () => {
     expect(component.loginForm().valid()).toBe(true);
   });
 
-  it('should emit the form value on submit when valid', () => {
+  it('should emit the form value on submit when valid', async () => {
     spyOn(component.submitted, 'emit');
 
     const emailInput = nativeElement.querySelector('input[type="email"]')!;
@@ -145,6 +145,7 @@ describe('LoginFormComponent', () => {
     fixture.detectChanges();
 
     form.dispatchEvent(new Event('submit'));
+    await fixture.whenStable(); // Wait for async submit() helper
 
     const expectedData: LoginForm = { email: 'test@example.com', password: 'password123' };
     expect(component.submitted.emit).toHaveBeenCalledWith(expectedData);

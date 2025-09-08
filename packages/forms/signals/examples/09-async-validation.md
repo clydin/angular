@@ -29,6 +29,7 @@ Use this pattern for validation that requires a network request. The `validateHt
 
 - **`validateHttp()`:** A function used within a schema to add an asynchronous validator to a field based on an HTTP request.
 - **`pending` signal:** A signal on the `FieldState` that is `true` while an asynchronous validator is running.
+- **`submit()`:** An async helper function that manages the form's submission state and should be called from the submit event handler.
 
 ## Example Files
 
@@ -40,7 +41,7 @@ This file defines the component's logic, including a schema that uses `validateH
 
 ```typescript
 import { Component, signal, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
-import { form, schema, required, validateHttp } from '@angular/forms/signals';
+import { form, schema, required, validateHttp, submit } from '@angular/forms/signals';
 import { JsonPipe } from '@angular/common';
 
 export interface RegistrationForm {
@@ -71,10 +72,10 @@ export class RegistrationFormComponent {
 
   registrationForm = form(this.registrationModel, registrationSchema);
 
-  handleSubmit() {
-    if (this.registrationForm().valid()) {
+  async handleSubmit() {
+    await submit(this.registrationForm, async () => {
       this.submitted.emit(this.registrationForm().value());
-    }
+    });
   }
 }
 ```
@@ -84,7 +85,7 @@ export class RegistrationFormComponent {
 This file provides the template for the form, showing how to display feedback while the asynchronous validation is pending.
 
 ```html
-<form (ngSubmit)="handleSubmit()">
+<form (submit)="handleSubmit(); $event.preventDefault()">
   <div>
     <label>
       Username:
