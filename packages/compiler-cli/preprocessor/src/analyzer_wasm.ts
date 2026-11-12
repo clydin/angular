@@ -10,6 +10,77 @@ import type * as nga from './types.js';
 import type {NgpCompilerOptions} from './compiler_options.js';
 import type {IAnalyzer} from './hybrid_compiler.js';
 
+export type ModuleFormat = 'ts' | 'tsx' | 'dts' | 'js' | 'jsx';
+export type {IdKind, ModuleRef} from './types.js';
+
+export interface HostItemError {
+  error: string;
+}
+
+export interface ResolveRequest {
+  importer: string;
+  specifier: string;
+  /** Syntax form: `'type-import'` is specifically `TSImportType` (`import('...')` in a type). */
+  kind: 'import' | 're-export' | 'dynamic-import' | 'type-import';
+  /** True for `import type`, `export type`, and `'type-import'`. */
+  typeOnly: boolean;
+  attributes?: Record<string, string>;
+}
+
+export interface ResolveResult {
+  id: string;
+  /** Required: the adapter knows its ID scheme; the core never guesses. */
+  idKind: nga.IdKind;
+  /** Optional here if provided on `LoadResult`; required on at least one of the two for modules. */
+  format?: ModuleFormat;
+  external?: boolean;
+  /** Optional inline content: saves the follow-up `load` round trip when the adapter already has it. */
+  code?: string;
+}
+
+export interface ResourceRequest {
+  containingFile: string;
+  url: string;
+  kind: 'template' | 'style';
+}
+
+export interface ResourceResolveResult {
+  id: string;
+  /** Defaults to `'path'` when omitted. */
+  idKind?: nga.IdKind;
+  /** Optional inline content (e.g. compiled Sass/CSS or HTML): skips the follow-up `load` wave. */
+  code?: string;
+}
+
+/** `external` echoes `ResolveResult.external` so the adapter can route external loads directly. */
+export interface LoadRequest {
+  id: string;
+  kind: 'module' | 'template' | 'style';
+  external: boolean;
+}
+
+export interface LoadResult {
+  code: string;
+  /** Required for `'module'` loads unless `ResolveResult.format` was already supplied. */
+  format?: ModuleFormat;
+}
+
+export interface AnalyzerHost {
+  /** Batch-resolve. Index-aligned results; `null` = unresolvable, `{error}` = failed with diagnostic. */
+  resolve(
+    requests: readonly ResolveRequest[],
+  ): Promise<ReadonlyArray<ResolveResult | HostItemError | null>>;
+  /** Required. The bundler is the authority for content; there is no disk fallback. */
+  load(requests: readonly LoadRequest[]): Promise<ReadonlyArray<LoadResult | HostItemError | null>>;
+  /**
+   * Optional: defaults to normalizing bare relative URLs (`./`) and resolving relative to
+   * `containingFile` via `resolve`.
+   */
+  resolveResource?(
+    requests: readonly ResourceRequest[],
+  ): Promise<ReadonlyArray<ResourceResolveResult | HostItemError | null>>;
+}
+
 /** The wasm-bindgen `WasmAnalyzer` surface this adapter drives. */
 export interface WasmInner {
   free(): void;
@@ -29,6 +100,8 @@ export interface WasmInner {
   set_entry_points?(entryPointsJson: string): string;
   clearResolutionCache?(): string;
   clear_resolution_cache?(): string;
+  provideHostResults?(batchId: number, resultsJson: string): void;
+  provide_host_results?(batchId: number, resultsJson: string): void;
   requestMetadata?(moduleRefJson: string): number;
   request_metadata?(moduleRefJson: string): number;
   getMetadataForFile?(filePath: string): string | undefined;
@@ -50,6 +123,7 @@ export interface WasmInner {
 }
 
 export interface WasmAnalyzerOptions {
+  host?: AnalyzerHost;
   isSynchronousHost?: boolean;
 }
 
@@ -73,6 +147,12 @@ type WasmEvent =
       event: 'metadataResult';
       data: nga.AnalysisResult | null;
       error?: string;
+    }
+  | {
+      id: number;
+      event: 'hostRequests';
+      resolve: ResolveRequest[];
+      load: LoadRequest[];
     };
 
 /** JS-side state of one engine stream; `null` in `queue` marks its end. */
@@ -87,21 +167,51 @@ interface PendingMetadataRequest {
   reject: (err: Error) => void;
 }
 
+async function settleHostSubBatch<Req, Res>(
+  requests: readonly Req[],
+  run: (reqs: readonly Req[]) => Promise<ReadonlyArray<Res | HostItemError | null>>,
+  label: string,
+): Promise<ReadonlyArray<Res | HostItemError | null>> {
+  if (requests.length === 0) {
+    return [];
+  }
+  try {
+    const results = await run(requests);
+    if (!Array.isArray(results) || results.length !== requests.length) {
+      const error = `AnalyzerHost.${label} returned ${
+        Array.isArray(results) ? results.length : typeof results
+      } results for ${requests.length} requests`;
+      return requests.map(() => ({error}));
+    }
+    return results;
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return requests.map(() => ({error}));
+  }
+}
+
 export class WasmAnalyzer implements IAnalyzer {
   private inner: WasmInner;
+  private host: AnalyzerHost | undefined;
   private explicitSyncHost: boolean | undefined;
   private streams = new Map<number, WasmStream>();
   private metadataRequests = new Map<number, PendingMetadataRequest>();
+  private pendingHostBatches = 0;
   private isPumping = false;
+  private closed = false;
 
   constructor(inner: WasmInner, options?: WasmAnalyzerOptions) {
     this.inner = inner;
+    this.host = options?.host;
     this.explicitSyncHost = options?.isSynchronousHost;
   }
 
   get isSynchronousHost(): boolean {
     if (this.explicitSyncHost !== undefined) {
       return this.explicitSyncHost;
+    }
+    if (this.host !== undefined) {
+      return false;
     }
     const fn = this.inner.isSynchronousHost ?? this.inner.is_synchronous_host;
     return fn ? fn.call(this.inner) : true;
@@ -112,14 +222,73 @@ export class WasmAnalyzer implements IAnalyzer {
   }
 
   private schedulePump() {
-    if (this.isPumping) {
+    if (this.closed || this.isPumping) {
       return;
     }
     this.isPumping = true;
     queueMicrotask(this.pumpLoop);
   }
 
+  private async fulfilHostBatch(
+    batchId: number,
+    resolveReqs: readonly ResolveRequest[],
+    loadReqs: readonly LoadRequest[],
+  ): Promise<void> {
+    const host = this.host;
+    let resolveResults: ReadonlyArray<ResolveResult | HostItemError | null>;
+    let loadResults: ReadonlyArray<LoadResult | HostItemError | null>;
+    if (!host) {
+      const noHost = {error: 'No AnalyzerHost configured for hostRequests'};
+      resolveResults = resolveReqs.map(() => noHost);
+      loadResults = loadReqs.map(() => noHost);
+    } else {
+      [resolveResults, loadResults] = await Promise.all([
+        settleHostSubBatch(resolveReqs, (reqs) => host.resolve(reqs), 'resolve'),
+        settleHostSubBatch(loadReqs, (reqs) => host.load(reqs), 'load'),
+      ]);
+    }
+
+    this.pendingHostBatches--;
+    if (this.closed) {
+      return;
+    }
+
+    try {
+      this.invoke(
+        this.inner.provideHostResults ?? this.inner.provide_host_results,
+        'provideHostResults',
+        batchId,
+        JSON.stringify({resolve: resolveResults, load: loadResults}),
+      );
+    } catch (err) {
+      const wrapped = err instanceof Error ? err : new Error(String(err));
+      for (const pending of this.metadataRequests.values()) {
+        pending.reject(wrapped);
+      }
+      this.metadataRequests.clear();
+      for (const stream of this.streams.values()) {
+        stream.error = wrapped;
+        if (stream.nextResolve) {
+          const resolve = stream.nextResolve;
+          stream.nextResolve = null;
+          resolve(null);
+        }
+      }
+      return;
+    }
+
+    if (this.hasActivePumpWork()) {
+      this.schedulePump();
+    }
+  }
+
   private dispatchEvent(event: WasmEvent): void {
+    if (event.event === 'hostRequests') {
+      this.pendingHostBatches++;
+      void this.fulfilHostBatch(event.id, event.resolve ?? [], event.load ?? []);
+      return;
+    }
+
     if (event.event === 'metadataResult') {
       const pending = this.metadataRequests.get(event.id);
       if (pending) {
@@ -152,16 +321,21 @@ export class WasmAnalyzer implements IAnalyzer {
   }
 
   private pumpLoop = () => {
-    if (!this.hasActivePumpWork()) {
+    if (this.closed || !this.hasActivePumpWork()) {
       this.isPumping = false;
       return;
     }
 
     const start = Date.now();
     let idleCount = 0;
+    let stalledOnHost = false;
     while (this.hasActivePumpWork() && Date.now() - start < 15) {
       const eventStr = this.inner.pump();
       if (!eventStr) {
+        if (this.pendingHostBatches > 0) {
+          stalledOnHost = true;
+          break;
+        }
         idleCount++;
         if (idleCount > 1000) {
           break;
@@ -177,7 +351,7 @@ export class WasmAnalyzer implements IAnalyzer {
       }
     }
 
-    if (this.hasActivePumpWork()) {
+    if (this.hasActivePumpWork() && !stalledOnHost) {
       setTimeout(this.pumpLoop, 0);
     } else {
       this.isPumping = false;
@@ -286,11 +460,11 @@ export class WasmAnalyzer implements IAnalyzer {
     close?.call(this.inner, id);
   }
 
-  async getMetadataForFile(filePath: string): Promise<nga.AnalysisResult | null> {
+  async getMetadataForFile(file: nga.ModuleRef): Promise<nga.AnalysisResult | null> {
     const id = this.invoke(
       this.inner.requestMetadata ?? this.inner.request_metadata,
       'requestMetadata',
-      JSON.stringify(filePath),
+      JSON.stringify(file),
     );
     return new Promise<nga.AnalysisResult | null>((resolve, reject) => {
       this.metadataRequests.set(id, {resolve, reject});
@@ -325,7 +499,7 @@ export class WasmAnalyzer implements IAnalyzer {
     return JSON.parse(res) as string[];
   }
 
-  async setEntryPoints(entryPoints: string[]): Promise<string[]> {
+  async setEntryPoints(entryPoints: nga.ModuleRef[]): Promise<string[]> {
     const res = this.invoke(
       this.inner.setEntryPoints ?? this.inner.set_entry_points,
       'setEntryPoints',
@@ -388,6 +562,7 @@ export class WasmAnalyzer implements IAnalyzer {
   }
 
   close(): void {
+    this.closed = true;
     const closeError = new Error('WasmAnalyzer closed');
     for (const pending of this.metadataRequests.values()) {
       pending.reject(closeError);
