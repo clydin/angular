@@ -605,7 +605,7 @@ pub(crate) async fn propagate_owning_reference_validated(
     parent_file: FileId,
 ) -> Vec<DeclarationData> {
     let parent_path = ctx.engine.lookup_path(parent_file);
-    if !crate::utils::is_dts(&parent_path) {
+    if !crate::utils::is_dts(&parent_path) && !ctx.engine.lookup_external(parent_file) {
         return declarations.to_vec();
     }
 
@@ -613,15 +613,20 @@ pub(crate) async fn propagate_owning_reference_validated(
 
     // Resolve the package entry point so re-exported aliases use the published name.
     let package_entry = match absolute_owning {
-        Some(owning) => ctx
-            .resolve_from_id(
-                parent_file,
+        Some(owning) => {
+            let resolve_base = owning
+                .relative_to()
+                .map(|p| ctx.engine.intern_path(p))
+                .unwrap_or(parent_file);
+            ctx.resolve_from_id(
+                resolve_base,
                 owning.specifier(),
                 crate::host::ImportKind::Static,
             )
             .await
             .map(|(id, _)| id)
-            .unwrap_or(parent_file),
+            .unwrap_or(parent_file)
+        }
         None => parent_file,
     };
 
@@ -638,9 +643,8 @@ pub(crate) async fn propagate_owning_reference_validated(
         if d.reference.owning_reference.is_none() {
             let decl = (d.reference.file, d.reference.name.clone());
             let published = absolute_owning.zip(exports.get(&decl));
-            d.reference.owning_reference = published.map(|(owning, export_name)| {
-                OwningReference::from_source_specifier(owning.specifier(), export_name.clone())
-            });
+            d.reference.owning_reference =
+                published.map(|(owning, name)| owning.with_export_name(name.clone()));
         }
         result.push(d);
     }

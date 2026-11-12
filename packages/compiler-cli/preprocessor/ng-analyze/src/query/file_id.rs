@@ -15,6 +15,7 @@ pub(crate) const MAX_INTERNED_FILE_ID: FileId = FileId::MAX - 16;
 struct InternedModule {
     id: ModuleId,
     kind: IdKind,
+    external: bool,
     /// Filesystem path when it differs from `id`: a non-UTF-8 path (`id` is then lossy) or a
     /// module promoted to [`IdKind::Path`] whose verbatim `id` is not structurally normalized.
     path_override: Option<PathBuf>,
@@ -94,7 +95,7 @@ impl FileIdInterner {
     }
 
     pub fn intern_path(&self, path: impl AsRef<Path>) -> FileId {
-        self.intern_path_inner(path.as_ref(), false).0
+        self.intern_path_inner(path.as_ref(), false, false).0
     }
 
     /// Intern a module identifier with a caller-supplied [`IdKind`].
@@ -104,8 +105,8 @@ impl FileIdInterner {
     /// so the host's reported [`IdKind`] wins.
     pub fn intern_module(&self, id: &str, kind: IdKind) -> FileId {
         match kind {
-            IdKind::Path => self.intern_path_inner(Path::new(id), false).0,
-            IdKind::Virtual => self.intern_virtual(id, false).0,
+            IdKind::Path => self.intern_path_inner(Path::new(id), false, false).0,
+            IdKind::Virtual => self.intern_virtual(id, false, false).0,
         }
     }
 
@@ -115,18 +116,41 @@ impl FileIdInterner {
     /// point that defaulted to [`IdKind::Path`]), the host-reported `kind` wins and the previous
     /// kind is returned so callers can invalidate results computed under it.
     pub fn intern_authoritative(&self, id: &str, kind: IdKind) -> (FileId, Option<IdKind>) {
-        match kind {
-            IdKind::Path => self.intern_path_inner(Path::new(id), true),
-            IdKind::Virtual => self.intern_virtual(id, true),
-        }
+        let (fid, prev, _) = match kind {
+            IdKind::Path => self.intern_path_inner(Path::new(id), true, false),
+            IdKind::Virtual => self.intern_virtual(id, true, false),
+        };
+        (fid, prev)
     }
 
-    fn intern_virtual(&self, id: &str, authoritative: bool) -> (FileId, Option<IdKind>) {
+    /// Intern an authoritative `(id, kind, external)` reported by [`crate::AnalysisHost::resolve`],
+    /// returning `(file_id, changed)` where `changed` is `true` if `kind` or `external` differed
+    /// from an existing interned entry.
+    pub fn intern_authoritative_module(
+        &self,
+        id: &str,
+        kind: IdKind,
+        external: bool,
+    ) -> (FileId, bool) {
+        let (fid, _, changed) = match kind {
+            IdKind::Path => self.intern_path_inner(Path::new(id), true, external),
+            IdKind::Virtual => self.intern_virtual(id, true, external),
+        };
+        (fid, changed)
+    }
+
+    fn intern_virtual(
+        &self,
+        id: &str,
+        authoritative: bool,
+        external: bool,
+    ) -> (FileId, Option<IdKind>, bool) {
         {
             let read = self.inner.read().expect("FileIdInterner lock poisoned");
             if let Some(&fid) = read.exact_map.get(id) {
-                if !authoritative || read.entries[fid as usize].kind == IdKind::Virtual {
-                    return (fid, None);
+                let entry = &read.entries[fid as usize];
+                if !authoritative || (entry.kind == IdKind::Virtual && entry.external == external) {
+                    return (fid, None, false);
                 }
             }
         }
@@ -135,8 +159,12 @@ impl FileIdInterner {
         // Reborrow the guard as `&mut InternerInner` so `entries` and `path_map` borrow disjointly.
         let write = &mut *guard;
         if let Some(&fid) = write.exact_map.get(id) {
+            if !authoritative {
+                return (fid, None, false);
+            }
             let previous = write.entries[fid as usize].kind;
-            if authoritative && previous != IdKind::Virtual {
+            let previous_external = write.entries[fid as usize].external;
+            if previous != IdKind::Virtual {
                 log_id_kind_override(id, previous, IdKind::Virtual);
                 let path = write.entries[fid as usize].path();
                 let norm = crate::fs::normalize_path(&path);
@@ -145,10 +173,12 @@ impl FileIdInterner {
                 }
                 let entry = &mut write.entries[fid as usize];
                 entry.kind = IdKind::Virtual;
+                entry.external = external;
                 entry.path_override = None;
-                return (fid, Some(previous));
+                return (fid, Some(previous), true);
             }
-            return (fid, None);
+            write.entries[fid as usize].external = external;
+            return (fid, None, previous_external != external);
         }
 
         let fid = allocate_file_id(write.entries.len());
@@ -156,20 +186,27 @@ impl FileIdInterner {
         write.entries.push(InternedModule {
             id: module_id.clone(),
             kind: IdKind::Virtual,
+            external: authoritative && external,
             path_override: None,
         });
         write.exact_map.insert(module_id, fid);
-        (fid, None)
+        (fid, None, false)
     }
 
-    fn intern_path_inner(&self, path_ref: &Path, authoritative: bool) -> (FileId, Option<IdKind>) {
+    fn intern_path_inner(
+        &self,
+        path_ref: &Path,
+        authoritative: bool,
+        external: bool,
+    ) -> (FileId, Option<IdKind>, bool) {
         // Only a `Path` entry may short-circuit here. A `Virtual` entry spelled like the path must
         // not shadow the `Path` entry that owns its lookup key, so it is matched after `path_map`.
         if let Some(raw_str) = path_ref.to_str() {
             let read = self.inner.read().expect("FileIdInterner lock poisoned");
             if let Some(&fid) = read.exact_map.get(raw_str) {
-                if read.entries[fid as usize].kind == IdKind::Path {
-                    return (fid, None);
+                let entry = &read.entries[fid as usize];
+                if entry.kind == IdKind::Path && (!authoritative || entry.external == external) {
+                    return (fid, None, false);
                 }
             }
         }
@@ -178,7 +215,16 @@ impl FileIdInterner {
         {
             let read = self.inner.read().expect("FileIdInterner lock poisoned");
             if let Some(&fid) = read.path_map.get(&*key) {
-                return (fid, None);
+                let entry = &read.entries[fid as usize];
+                if !authoritative || entry.external == external {
+                    return (fid, None, false);
+                }
+            } else if !authoritative {
+                if let Some(raw_str) = path_ref.to_str() {
+                    if let Some(&fid) = read.exact_map.get(raw_str) {
+                        return (fid, None, false);
+                    }
+                }
             }
         }
 
@@ -188,7 +234,11 @@ impl FileIdInterner {
 
         let mut write = self.inner.write().expect("FileIdInterner lock poisoned");
         if let Some(&fid) = write.path_map.get(&*key) {
-            return (fid, None);
+            if authoritative && write.entries[fid as usize].external != external {
+                write.entries[fid as usize].external = external;
+                return (fid, None, true);
+            }
+            return (fid, None, false);
         }
         if is_valid_utf8 {
             let existing = path_ref
@@ -196,17 +246,23 @@ impl FileIdInterner {
                 .and_then(|raw_str| write.exact_map.get(raw_str).copied())
                 .or_else(|| write.exact_map.get(spelled_id.as_str()).copied());
             if let Some(fid) = existing {
+                if !authoritative {
+                    return (fid, None, false);
+                }
                 let previous = write.entries[fid as usize].kind;
-                if authoritative && previous != IdKind::Path {
+                let previous_external = write.entries[fid as usize].external;
+                if previous != IdKind::Path {
                     let entry = &mut write.entries[fid as usize];
                     log_id_kind_override(entry.id.as_str(), previous, IdKind::Path);
                     entry.kind = IdKind::Path;
+                    entry.external = external;
                     // Keep the host's verbatim ID, but give path math the normalized spelling.
                     entry.path_override = (entry.id != spelled_id).then_some(spelled_path);
                     write.path_map.insert(key.into_owned(), fid);
-                    return (fid, Some(previous));
+                    return (fid, Some(previous), true);
                 }
-                return (fid, None);
+                write.entries[fid as usize].external = external;
+                return (fid, None, previous_external != external);
             }
         }
 
@@ -214,13 +270,14 @@ impl FileIdInterner {
         write.entries.push(InternedModule {
             id: spelled_id.clone(),
             kind: IdKind::Path,
+            external: authoritative && external,
             path_override: (!is_valid_utf8).then_some(spelled_path),
         });
         if is_valid_utf8 {
             write.exact_map.insert(spelled_id, fid);
         }
         write.path_map.insert(key.into_owned(), fid);
-        (fid, None)
+        (fid, None, false)
     }
 
     /// Lookup the `PathBuf` corresponding to a `FileId`.
@@ -253,6 +310,15 @@ impl FileIdInterner {
         read.entries
             .get(id as usize)
             .map(|entry| entry.kind)
+            .expect("FileId out of bounds in FileIdInterner")
+    }
+
+    /// Whether `id` was marked bundle-external by an authoritative host resolution.
+    pub fn lookup_external(&self, id: FileId) -> bool {
+        let read = self.inner.read().expect("FileIdInterner lock poisoned");
+        read.entries
+            .get(id as usize)
+            .map(|entry| entry.external)
             .expect("FileId out of bounds in FileIdInterner")
     }
 
@@ -603,5 +669,33 @@ mod tests {
             assert_eq!(interner.intern_path(&unicode_path), id1);
         }
         assert_eq!(interner.len(), 2);
+    }
+
+    #[test]
+    fn test_authoritative_external_flag_tracking() {
+        let interner = FileIdInterner::new();
+
+        // First sighting as external records `external: true` without reporting a change.
+        let (ext_id, changed) =
+            interner.intern_authoritative_module("/vendor/ext/index.ts", IdKind::Path, true);
+        assert!(!changed);
+        assert!(interner.lookup_external(ext_id));
+
+        // Non-authoritative lookup preserves `external: true`.
+        assert_eq!(interner.intern_path("/vendor/ext/index.ts"), ext_id);
+        assert!(interner.lookup_external(ext_id));
+
+        // Reclassifying an existing non-external module to `external: true` sets `changed = true`.
+        let local_id = interner.intern_path("/app/local.ts");
+        assert!(!interner.lookup_external(local_id));
+        assert_eq!(
+            interner.intern_authoritative_module("/app/local.ts", IdKind::Path, true),
+            (local_id, true)
+        );
+        assert!(interner.lookup_external(local_id));
+        assert_eq!(
+            interner.intern_authoritative_module("/app/local.ts", IdKind::Path, true),
+            (local_id, false)
+        );
     }
 }

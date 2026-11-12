@@ -39,6 +39,28 @@ pub trait ReferenceEmitStrategy: Send + Sync {
         declaring_export_name: Option<&str>,
     ) -> ReferenceMetadata;
 
+    /// [`Self::emit`] aware of the consumer and target [`crate::host::IdKind`]s, so non-path
+    /// (`IdKind::Virtual`) modules never undergo relative-path diffing or extension stripping.
+    fn emit_with_kinds(
+        &self,
+        reference: &Reference,
+        consumer: FileId,
+        consumer_path: &Path,
+        consumer_kind: crate::host::IdKind,
+        target_path: &Path,
+        target_kind: crate::host::IdKind,
+        declaring_export_name: Option<&str>,
+    ) -> ReferenceMetadata {
+        let _ = (consumer_kind, target_kind);
+        self.emit(
+            reference,
+            consumer,
+            consumer_path,
+            target_path,
+            declaring_export_name,
+        )
+    }
+
     /// Resolves an import module specifier declared in `declaring_path` so it is importable from `consumer_path`.
     fn resolve_import_specifier(
         &self,
@@ -57,7 +79,10 @@ pub trait ReferenceEmitStrategy: Send + Sync {
 /// APF (Angular Package Format) and standard Node relative import strategy.
 ///
 /// - Published packages use `owning_reference` specifier semantics (e.g. `@angular/core`).
-/// - In-project files compute relative import paths (`./...` or `../...`).
+/// - In-project [`crate::host::IdKind::Path`] files compute relative import paths (`./...` or
+///   `../...`).
+/// - Whenever either consumer or target is [`crate::host::IdKind::Virtual`], the target module ID
+///   is emitted verbatim without path diffing or extension stripping.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApfImportStrategy;
 
@@ -108,13 +133,26 @@ impl ApfImportStrategy {
         &self,
         reference: &Reference,
         consumer_path: &Path,
+        consumer_kind: crate::host::IdKind,
         target_path: &Path,
+        target_kind: crate::host::IdKind,
     ) -> Option<String> {
         if let Some(owning) = &reference.owning_reference {
-            return Some(owning.specifier().to_string());
+            return Some(owning.specifier_for_consumer(
+                Some(consumer_path),
+                consumer_kind == crate::host::IdKind::Path,
+            ));
         }
 
-        Some(relative_specifier_between(consumer_path, target_path))
+        match (consumer_kind, target_kind) {
+            (crate::host::IdKind::Path, crate::host::IdKind::Path) => {
+                Some(relative_specifier_between(consumer_path, target_path))
+            }
+            (_, crate::host::IdKind::Virtual) => Some(target_path.to_string_lossy().into_owned()),
+            (crate::host::IdKind::Virtual, crate::host::IdKind::Path) => {
+                Some(crate::fs::path_to_string(target_path.to_path_buf()))
+            }
+        }
     }
 }
 
@@ -127,7 +165,34 @@ impl ReferenceEmitStrategy for ApfImportStrategy {
         target_path: &Path,
         declaring_export_name: Option<&str>,
     ) -> ReferenceMetadata {
-        let specifier = self.resolve_specifier(reference, consumer_path, target_path);
+        self.emit_with_kinds(
+            reference,
+            consumer,
+            consumer_path,
+            crate::host::IdKind::Path,
+            target_path,
+            crate::host::IdKind::Path,
+            declaring_export_name,
+        )
+    }
+
+    fn emit_with_kinds(
+        &self,
+        reference: &Reference,
+        consumer: FileId,
+        consumer_path: &Path,
+        consumer_kind: crate::host::IdKind,
+        target_path: &Path,
+        target_kind: crate::host::IdKind,
+        declaring_export_name: Option<&str>,
+    ) -> ReferenceMetadata {
+        let specifier = self.resolve_specifier(
+            reference,
+            consumer_path,
+            consumer_kind,
+            target_path,
+            target_kind,
+        );
         // Specifier and name must come from the same module. The owning package publishes both;
         // a relative path targets the declaring file, so only that file's export table can name
         // the symbol.
@@ -851,5 +916,140 @@ mod tests {
             "",
         );
         assert_eq!(resolved_empty, "");
+    }
+
+    #[test]
+    fn test_apf_emit_with_virtual_ids() {
+        use crate::host::IdKind;
+        let strategy = ApfImportStrategy::new();
+        let virt_target = Reference {
+            file: 2,
+            name: "VirtDir".to_string(),
+            owning_reference: None,
+            aliases: std::collections::HashMap::new(),
+            is_default_export: false,
+        };
+
+        // Path consumer -> Virtual target emits verbatim virtual ID without stripping `.ts?inline`.
+        let meta = strategy.emit_with_kinds(
+            &virt_target,
+            1,
+            Path::new("/app/src/app.component.ts"),
+            IdKind::Path,
+            Path::new("\0virtual:dir.ts?inline"),
+            IdKind::Virtual,
+            Some("VirtDir"),
+        );
+        assert_eq!(
+            meta.consumer_import.as_ref().map(|i| i.specifier.as_str()),
+            Some("\0virtual:dir.ts?inline")
+        );
+
+        // Virtual consumer -> Path target emits the full path verbatim instead of diffing paths.
+        let path_target = Reference {
+            file: 3,
+            name: "RealDir".to_string(),
+            owning_reference: None,
+            aliases: std::collections::HashMap::new(),
+            is_default_export: false,
+        };
+        let from_virt = strategy.emit_with_kinds(
+            &path_target,
+            2,
+            Path::new("/@id/virtual-app"),
+            IdKind::Virtual,
+            Path::new("/app/src/real.directive.ts"),
+            IdKind::Path,
+            Some("RealDir"),
+        );
+        assert_eq!(
+            from_virt
+                .consumer_import
+                .as_ref()
+                .map(|i| i.specifier.as_str()),
+            Some("/app/src/real.directive.ts")
+        );
+    }
+
+    #[test]
+    fn test_apf_emit_with_external_relative_and_aliased_specifiers() {
+        use crate::host::IdKind;
+        let strategy = ApfImportStrategy::new();
+
+        // Rooted alias (`/external/ui`) stays verbatim regardless of consumer directory.
+        let aliased = Reference {
+            file: 10,
+            name: "ExtButton".to_string(),
+            owning_reference: Some(OwningReference::from_external_specifier(
+                "/@ext/ui",
+                "ExtButton",
+                Some(Path::new("/app/src/shared/mod.ts")),
+            )),
+            aliases: std::collections::HashMap::new(),
+            is_default_export: false,
+        };
+        let meta_alias = strategy.emit_with_kinds(
+            &aliased,
+            11,
+            Path::new("/app/src/feature/deep/cmp.ts"),
+            IdKind::Path,
+            Path::new("/vendor/unbundled/ui/internal/button.ts"),
+            IdKind::Path,
+            Some("ExtButton"),
+        );
+        assert_eq!(
+            meta_alias
+                .consumer_import
+                .as_ref()
+                .map(|i| i.specifier.as_str()),
+            Some("/@ext/ui")
+        );
+
+        // Relative external (`../vendor/ext.mjs`) stays verbatim in the same directory and rebases
+        // cleanly for consumers in deeper directories without touching the resolved target path.
+        let rel_ext = Reference {
+            file: 12,
+            name: "ExtCard".to_string(),
+            owning_reference: Some(OwningReference::from_external_specifier(
+                "../vendor/ext.mjs",
+                "ExtCard",
+                Some(Path::new("/app/src/shared/mod.ts")),
+            )),
+            aliases: std::collections::HashMap::new(),
+            is_default_export: false,
+        };
+        let same_dir = strategy.emit_with_kinds(
+            &rel_ext,
+            13,
+            Path::new("/app/src/shared/other.ts"),
+            IdKind::Path,
+            Path::new("/cache/external/dist/internal/card.ts"),
+            IdKind::Path,
+            Some("ExtCard"),
+        );
+        assert_eq!(
+            same_dir
+                .consumer_import
+                .as_ref()
+                .map(|i| i.specifier.as_str()),
+            Some("../vendor/ext.mjs")
+        );
+
+        let deeper_dir = strategy.emit_with_kinds(
+            &rel_ext,
+            14,
+            Path::new("/app/src/feature/deep/cmp.ts"),
+            IdKind::Path,
+            Path::new("/cache/external/dist/internal/card.ts"),
+            IdKind::Path,
+            Some("ExtCard"),
+        );
+        assert_eq!(
+            deeper_dir
+                .consumer_import
+                .as_ref()
+                .map(|i| i.specifier.as_str()),
+            Some("../../vendor/ext.mjs")
+        );
     }
 }

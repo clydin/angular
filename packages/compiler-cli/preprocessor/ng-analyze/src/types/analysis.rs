@@ -8,13 +8,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Package specifier and exported name through which a symbol is published (`bestGuessOwningModule`).
+/// Package or external specifier and exported name through which a symbol is published
+/// (`bestGuessOwningModule`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OwningReference {
-    /// Absolute/package specifier (e.g. `@angular/router`), constructed only via
-    /// [`OwningReference::from_source_specifier`].
+    /// Source-written specifier (e.g. `@angular/router`, `/@ext/ui`, or `./vendor/ext`),
+    /// constructed only from source provenance via [`OwningReference::from_source_specifier`] or
+    /// [`OwningReference::from_external_specifier`].
     specifier: String,
     export_name: String,
+    /// For a bundle-external module reached through a relative specifier (`./...` or `../...`),
+    /// the [`crate::host::IdKind::Path`] importer file where `specifier` was written, so consumers
+    /// in other directories rebase the source specifier without using the resolved file path.
+    relative_to: Option<PathBuf>,
 }
 
 impl OwningReference {
@@ -28,6 +34,34 @@ impl OwningReference {
         Self {
             specifier: specifier.into(),
             export_name: export_name.into(),
+            relative_to: None,
+        }
+    }
+
+    /// Construct from a literal specifier written in source that resolved to a bundle-external
+    /// module (`ResolvedModule::external == true`), preserving relative/aliased source specifiers.
+    pub fn from_external_specifier(
+        specifier: impl Into<String>,
+        export_name: impl Into<String>,
+        importer_path: Option<&Path>,
+    ) -> Self {
+        let specifier = specifier.into();
+        let relative_to = importer_path
+            .filter(|_| specifier.starts_with('.'))
+            .map(Path::to_path_buf);
+        Self {
+            specifier,
+            export_name: export_name.into(),
+            relative_to,
+        }
+    }
+
+    /// Copy this owning module's specifier provenance with a different exported symbol name.
+    pub fn with_export_name(&self, export_name: impl Into<String>) -> Self {
+        Self {
+            specifier: self.specifier.clone(),
+            export_name: export_name.into(),
+            relative_to: self.relative_to.clone(),
         }
     }
 
@@ -39,6 +73,42 @@ impl OwningReference {
     /// The specifier an importer must write to reach the owning package.
     pub fn specifier(&self) -> &str {
         self.specifier.as_str()
+    }
+
+    /// Importer path from which a relative external specifier was written, if any.
+    pub fn relative_to(&self) -> Option<&Path> {
+        self.relative_to.as_deref()
+    }
+
+    /// Project [`Self::specifier`] into a consumer's directory when `relative_to` is set and the
+    /// consumer is [`crate::host::IdKind::Path`]; otherwise return [`Self::specifier`] verbatim.
+    pub fn specifier_for_consumer(
+        &self,
+        consumer_path: Option<&Path>,
+        consumer_is_path: bool,
+    ) -> String {
+        let Some(importer_path) = self.relative_to.as_deref() else {
+            return self.specifier.clone();
+        };
+        if !consumer_is_path {
+            return self.specifier.clone();
+        }
+        let Some(consumer_path) = consumer_path else {
+            return self.specifier.clone();
+        };
+        let importer_dir = importer_path.parent().unwrap_or(Path::new("."));
+        let consumer_dir = consumer_path.parent().unwrap_or(Path::new("."));
+        if importer_dir == consumer_dir {
+            return self.specifier.clone();
+        }
+        let target = crate::fs::normalize_path_structural(&importer_dir.join(&self.specifier));
+        let relative =
+            pathdiff::diff_paths(&*target, consumer_dir).unwrap_or_else(|| target.into_owned());
+        let mut out = relative.to_string_lossy().replace('\\', "/");
+        if !relative.is_absolute() && !out.starts_with('.') {
+            out = format!("./{out}");
+        }
+        out
     }
 
     /// The name that package exports the symbol under.
@@ -60,15 +130,16 @@ pub struct HostDirectiveEntry {
 
 impl HostDirectiveEntry {
     /// Project this entry into `consumer`'s frame, deciding how that file writes the directive.
-    pub(crate) fn into_wire(
+    pub(crate) fn into_wire_with_kinds(
         self,
         consumer: FileId,
         consumer_path: Option<&Path>,
         lookup: Option<&(impl Fn(FileId) -> PathBuf + ?Sized)>,
+        kind_lookup: Option<&(impl Fn(FileId) -> crate::host::IdKind + ?Sized)>,
     ) -> HostDirectiveMetadata {
-        let specifier = self
-            .directive
-            .specifier_for(consumer, consumer_path, lookup);
+        let specifier =
+            self.directive
+                .specifier_for_with_kinds(consumer, consumer_path, lookup, kind_lookup);
         HostDirectiveMetadata {
             directive: crate::types::metadata::ReferenceMetadata::for_consumer(
                 &self.directive,
@@ -149,18 +220,49 @@ impl Reference {
         consumer_path: Option<&Path>,
         lookup: Option<&(impl Fn(FileId) -> PathBuf + ?Sized)>,
     ) -> Option<String> {
+        self.specifier_for_with_kinds(
+            consumer,
+            consumer_path,
+            lookup,
+            None::<&dyn Fn(FileId) -> crate::host::IdKind>,
+        )
+    }
+
+    /// Module specifier for `consumer` to import this symbol, computing relative paths only when
+    /// both `consumer` and `self.file` are [`crate::host::IdKind::Path`].
+    pub fn specifier_for_with_kinds(
+        &self,
+        consumer: FileId,
+        consumer_path: Option<&Path>,
+        lookup: Option<&(impl Fn(FileId) -> PathBuf + ?Sized)>,
+        kind_lookup: Option<&(impl Fn(FileId) -> crate::host::IdKind + ?Sized)>,
+    ) -> Option<String> {
+        let consumer_kind = kind_lookup
+            .map(|k| k(consumer))
+            .unwrap_or(crate::host::IdKind::Path);
         // Check `owning_reference` first: import-hole references record the importer as `self.file`.
         if let Some(owning) = &self.owning_reference {
-            return Some(owning.specifier().to_string());
+            return Some(owning.specifier_for_consumer(
+                consumer_path,
+                consumer_kind == crate::host::IdKind::Path,
+            ));
         }
         if self.file == consumer {
             return None;
         }
         let target = lookup?(self.file);
-        Some(crate::analyzer::import_emit::relative_specifier_between(
-            consumer_path?,
-            &target,
-        ))
+        let target_kind = kind_lookup
+            .map(|k| k(self.file))
+            .unwrap_or(crate::host::IdKind::Path);
+        match (consumer_kind, target_kind) {
+            (crate::host::IdKind::Path, crate::host::IdKind::Path) => Some(
+                crate::analyzer::import_emit::relative_specifier_between(consumer_path?, &target),
+            ),
+            (_, crate::host::IdKind::Virtual) => Some(target.to_string_lossy().into_owned()),
+            (crate::host::IdKind::Virtual, crate::host::IdKind::Path) => {
+                Some(crate::fs::path_to_string(target))
+            }
+        }
     }
     pub fn from_value_reference(r: &crate::evaluator::value::ValueReference) -> Self {
         let mut aliases = std::collections::HashMap::new();
@@ -665,9 +767,11 @@ impl FileData {
             .map(|c| c.to_wire(cx))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let id_kind = cx.kind_of(self.file_id);
         Ok(crate::AnalysisResult {
             file_id: self.file_id,
             file_path: self.file_path.to_string_lossy().into(),
+            id_kind: Some(id_kind),
             imports_end: self.imports_end,
             classes,
             imports: self.wire_imports(),
@@ -694,7 +798,7 @@ impl FileData {
                     )
                 })
                 .collect(),
-            r3_symbols_specifier: self.r3_symbols_specifier(cx.r3_symbols_path),
+            r3_symbols_specifier: self.r3_symbols_specifier(cx.r3_symbols_path, id_kind),
             top_level_value_bindings: self.top_level_value_bindings.clone(),
             namespace_alias_conflicts: self.namespace_alias_conflicts.clone(),
             static_dependencies: self
@@ -705,15 +809,26 @@ impl FileData {
         })
     }
 
-    fn r3_symbols_specifier(&self, r3_symbols_path: Option<&Path>) -> Option<String> {
+    fn r3_symbols_specifier(
+        &self,
+        r3_symbols_path: Option<&Path>,
+        consumer_kind: crate::host::IdKind,
+    ) -> Option<String> {
         if !self.is_core {
             return None;
         }
         let r3_symbols_path = r3_symbols_path?;
-        Some(crate::analyzer::import_emit::relative_specifier_between(
-            &self.file_path,
-            r3_symbols_path,
-        ))
+        match consumer_kind {
+            crate::host::IdKind::Path => Some(
+                crate::analyzer::import_emit::relative_specifier_between(
+                    &self.file_path,
+                    r3_symbols_path,
+                ),
+            ),
+            crate::host::IdKind::Virtual => {
+                Some(crate::fs::path_to_string(r3_symbols_path.to_path_buf()))
+            }
+        }
     }
 
     /// The import table is single-file syntactic data, identical in both projections.

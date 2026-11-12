@@ -104,8 +104,20 @@ impl WasmAnalyzer {
         options_json: &str,
         host_fs: Option<crate::physical_fs::JsHostFs>,
     ) -> Result<WasmAnalyzer, String> {
-        let options: AnalyzerOptions =
+        let mut raw: serde_json::Value =
             serde_json::from_str(options_json).map_err(|e| e.to_string())?;
+        let entry_refs: Option<Vec<crate::host::ModuleRef>> = match raw
+            .as_object_mut()
+            .and_then(|obj| obj.remove("entryPoints"))
+        {
+            Some(serde_json::Value::Null) | None => None,
+            Some(val) => Some(serde_json::from_value(val).map_err(|e| e.to_string())?),
+        };
+        let mut options: AnalyzerOptions =
+            serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        if entry_refs.is_some() {
+            options.entry_points = Some(Vec::new());
+        }
 
         let physical: Arc<dyn crate::physical_fs::PhysicalFs> = match host_fs {
             Some(host) => Arc::new(crate::physical_fs::HostFs::new(host)),
@@ -115,6 +127,9 @@ impl WasmAnalyzer {
         };
 
         let analyzer = Analyzer::new_core_with_physical_fs(options, physical)?;
+        if let Some(refs) = entry_refs {
+            analyzer.set_entry_points_refs_core(refs)?;
+        }
         Ok(Self {
             analyzer: Arc::new(analyzer),
             next_id: 1,
@@ -195,9 +210,9 @@ impl WasmAnalyzer {
     }
 
     pub fn set_entry_points(&self, entry_points_json: &str) -> Result<String, String> {
-        let entry_points: Vec<String> =
+        let entry_points: Vec<crate::host::ModuleRef> =
             serde_json::from_str(entry_points_json).map_err(|e| e.to_string())?;
-        let res = self.analyzer.set_entry_points_core(entry_points)?;
+        let res = self.analyzer.set_entry_points_refs_core(entry_points)?;
         serde_json::to_string(&res).map_err(|e| e.to_string())
     }
 

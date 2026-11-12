@@ -52,11 +52,13 @@ async fn project_reference(
 ) -> crate::types::metadata::ReferenceMetadata {
     let target_path = ctx.engine.lookup_path(reference.file);
     let declaring_export_name = ctx.declaring_export_name(reference).await;
-    ctx.engine.reference_strategy.emit(
+    ctx.engine.reference_strategy.emit_with_kinds(
         reference,
         consumer,
         consumer_path,
+        ctx.engine.lookup_kind(consumer),
         &target_path,
+        ctx.engine.lookup_kind(reference.file),
         declaring_export_name.as_deref(),
     )
 }
@@ -141,10 +143,11 @@ async fn resolve_host_directive_class(
         });
     }
 
-    let specifier = hd.directive.specifier_for(
+    let specifier = hd.directive.specifier_for_with_kinds(
         declaring_file_id,
         Some(declaring_file_path),
         Some(&|id| ctx.engine.lookup_path(id)),
+        Some(&|id| ctx.engine.lookup_kind(id)),
     );
     let export_name = hd.directive.export_name().to_string();
 
@@ -213,11 +216,18 @@ async fn resolve_host_directive(
     }
 
     let mut invalid_reason = None;
-    if reference.owning_reference.is_none() && crate::utils::is_dts(declaring_file_path) {
+    if reference.owning_reference.is_none()
+        && (crate::utils::is_dts(declaring_file_path)
+            || ctx.engine.lookup_external(declaring_file_id))
+    {
         if let Some(owning) = parent_owning {
+            let resolve_base = owning
+                .relative_to()
+                .map(|p| ctx.engine.intern_path(p))
+                .unwrap_or(consumer_file);
             let package_entry_resolved = match ctx
                 .resolve_from_id(
-                    consumer_file,
+                    resolve_base,
                     owning.specifier(),
                     crate::host::ImportKind::Static,
                 )
@@ -237,10 +247,7 @@ async fn resolve_host_directive(
                 let exports = ctx.module_export_map(package_entry).await;
                 let decl_key = (decl_file_id, reference.name.clone());
                 if let Some(export_name) = exports.get(&decl_key) {
-                    reference.owning_reference = Some(OwningReference::from_source_specifier(
-                        owning.specifier(),
-                        export_name.clone(),
-                    ));
+                    reference.owning_reference = Some(owning.with_export_name(export_name.clone()));
                 } else {
                     let entry_path = ctx.engine.lookup_path(package_entry);
                     invalid_reason = Some(format!(
@@ -658,14 +665,30 @@ async fn resolve_import_usage(
 
 /// The reference for a resolved entry of the legacy identifier-rooted `imports` list.
 fn legacy_import_reference(
+    ctx: &QueryCtx,
     tuple: &DeclarationTuple,
     class_info: &crate::ClassInfo,
     consumer_file: crate::query::FileId,
+    consumer_path: &Path,
 ) -> crate::types::analysis::Reference {
     let owning_reference = tuple.import_source.as_ref().and_then(|source| {
-        OwningReference::is_absolute_specifier(source).then(|| {
-            OwningReference::from_source_specifier(source.clone(), tuple.export_name().to_owned())
-        })
+        if OwningReference::is_absolute_specifier(source) {
+            Some(OwningReference::from_source_specifier(
+                source.clone(),
+                tuple.export_name().to_owned(),
+            ))
+        } else if ctx.engine.lookup_external(class_info.reference_id.file) {
+            let importer_path =
+                (ctx.engine.lookup_kind(consumer_file) == crate::host::IdKind::Path)
+                    .then_some(consumer_path);
+            Some(OwningReference::from_external_specifier(
+                source.clone(),
+                tuple.export_name().to_owned(),
+                importer_path,
+            ))
+        } else {
+            None
+        }
     });
     let mut aliases = std::collections::HashMap::new();
     aliases.insert(class_info.reference_id.file, class_info.class_name.clone());
@@ -1005,9 +1028,13 @@ async fn optimize_component_scope(
 
                 let reference = match entry {
                     Entry::Evaluated(r, _) => r.clone(),
-                    Entry::Parsed(tuple) => {
-                        legacy_import_reference(tuple, &class_info, reference_id.file)
-                    }
+                    Entry::Parsed(tuple) => legacy_import_reference(
+                        ctx,
+                        tuple,
+                        &class_info,
+                        reference_id.file,
+                        file_path,
+                    ),
                 };
 
                 let (is_potential_shared, usage_span) = match entry {
@@ -1251,9 +1278,13 @@ async fn optimize_component_scope(
                 let flattened = flatten_class_info(class_info.clone(), ctx).await;
                 let reference = match entry {
                     DefEntry::Evaluated(r) => r.clone(),
-                    DefEntry::Parsed(tuple) => {
-                        legacy_import_reference(tuple, &class_info, reference_id.file)
-                    }
+                    DefEntry::Parsed(tuple) => legacy_import_reference(
+                        ctx,
+                        tuple,
+                        &class_info,
+                        reference_id.file,
+                        file_path,
+                    ),
                 };
 
                 let same_file = reference.file == reference_id.file;
