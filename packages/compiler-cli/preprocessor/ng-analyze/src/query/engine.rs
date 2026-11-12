@@ -522,6 +522,21 @@ impl QueryEngine {
         })
     }
 
+    pub(crate) fn has_interned_path(&self, path: &Path) -> bool {
+        self.get_interned_file_id(path).is_some()
+    }
+
+    /// Drop every cached query whose `SharedQuery` has not completed yet and cancel pending host
+    /// batches so mid-wave cancellation never leaves parked queries behind in the cache.
+    pub fn cancel_in_flight_queries(&self) {
+        for key in self.cache.remove_incomplete() {
+            if let Some(fid) = key.file_id() {
+                self.mark_file_dirty(fid);
+            }
+        }
+        self.host.cancel_pending();
+    }
+
     /// Purge every cached query that depends on `path` (file invalidation). Dropping the cached
     /// `SharedQuery` clones also cancels any still-running tasks for those keys. The component
     /// mapping is a whole-program singleton, so it is always dropped. Returns the list of evicted keys.

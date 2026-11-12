@@ -118,6 +118,7 @@ use napi_derive::napi;
 pub struct Analyzer {
     resource_registry: Arc<ResourceRegistry>,
     fs: OverlayFileSystem,
+    batching_host: Option<Arc<crate::host::BatchingHost>>,
     engine: Arc<crate::query::QueryEngine>,
     #[cfg(not(target_arch = "wasm32"))]
     active_handles: Arc<RwLock<Vec<futures::future::RemoteHandle<()>>>>,
@@ -346,12 +347,54 @@ impl Analyzer {
         fs: OverlayFileSystem,
     ) -> Result<Self, String> {
         let config = EffectiveConfig::resolve(options, &fs)?;
-        Ok(tracing::info_span!("ConstructAnalyzer").in_scope(|| Self::construct(config, fs)))
+        let analyzer = tracing::info_span!("ConstructAnalyzer")
+            .in_scope(|| Self::construct(config, fs, None));
+        Ok(analyzer)
+    }
+
+    /// Construct an analyzer backed by [`crate::host::BatchingHost`] over
+    /// [`crate::physical_fs::NoopFs`].
+    ///
+    /// Every resolution and content read goes through `BatchingHost` (plus any proactive
+    /// `virtual_files` / `updateFileContent` overlay entries); no physical filesystem is consulted.
+    pub fn new_core_with_batching_host(
+        options: AnalyzerOptions,
+    ) -> Result<(Self, Arc<crate::host::BatchingHost>), String> {
+        let _span = tracing::info_span!("InitializeBatchingHost").entered();
+        if options.tsconfig_path.is_some() {
+            return Err("tsconfig_path cannot be combined with a custom host".to_string());
+        }
+        if options.allowed_sources.is_some() {
+            return Err("allowed_sources cannot be combined with a custom host".to_string());
+        }
+        let batching_host = Arc::new(crate::host::BatchingHost::new());
+        if let Some(ref virtual_files) = options.virtual_files {
+            for (id, content) in virtual_files {
+                let format = crate::host::ModuleFormat::from_path(Path::new(id));
+                batching_host.upsert_overlay(
+                    crate::host::ModuleId::from(id.as_str()),
+                    Arc::from(content.as_str()),
+                    format,
+                );
+            }
+        }
+        let fs = OverlayFileSystem::new_with_allowed_sources_and_fs(
+            None,
+            Arc::new(crate::physical_fs::NoopFs),
+        );
+        let config = EffectiveConfig::resolve(options, &fs)?;
+        let analyzer = tracing::info_span!("ConstructAnalyzer")
+            .in_scope(|| Self::construct(config, fs, Some(batching_host.clone())));
+        Ok((analyzer, batching_host))
     }
 
     /// Build the analyzer from fully merged settings. Order matters: the symlink mode and the
     /// `rootDirs` must be set on `fs` before entry points are canonicalized through it.
-    fn construct(config: EffectiveConfig, fs: OverlayFileSystem) -> Self {
+    fn construct(
+        config: EffectiveConfig,
+        fs: OverlayFileSystem,
+        batching_host: Option<Arc<crate::host::BatchingHost>>,
+    ) -> Self {
         fs.set_preserve_symlinks(config.preserve_symlinks);
         fs.set_root_dirs(config.merge_root_dirs);
 
@@ -370,13 +413,6 @@ impl Analyzer {
 
         let resource_registry = Arc::new(ResourceRegistry::default());
 
-        let resolver = Arc::new(create_resolver_with_fs(
-            config.tsconfig_path.as_deref(),
-            fs.clone(),
-            config.preserve_symlinks,
-            config.node_modules_path_override,
-        ));
-
         use crate::analyzer::import_emit::{
             ApfImportStrategy, PrefixImportStrategy, ReferenceEmitStrategy,
         };
@@ -387,9 +423,21 @@ impl Analyzer {
             _ => Arc::new(ApfImportStrategy::new()),
         };
 
-        let engine = crate::query::QueryEngine::new_with_options(
-            fs.clone(),
-            resolver,
+        let host: Arc<dyn crate::host::AnalysisHost> = match &batching_host {
+            Some(batch_host) => batch_host.clone(),
+            None => {
+                let resolver = Arc::new(create_resolver_with_fs(
+                    config.tsconfig_path.as_deref(),
+                    fs.clone(),
+                    config.preserve_symlinks,
+                    config.node_modules_path_override,
+                ));
+                Arc::new(crate::host::DefaultFsHost::new(fs.clone(), resolver))
+            }
+        };
+
+        let engine = crate::query::QueryEngine::new_with_host(
+            host,
             resource_registry.clone(),
             entrypoints_lock.clone(),
             reference_strategy,
@@ -410,6 +458,7 @@ impl Analyzer {
         Analyzer {
             resource_registry,
             fs,
+            batching_host,
             engine,
             #[cfg(not(target_arch = "wasm32"))]
             active_handles: Arc::new(RwLock::new(Vec::new())),
@@ -419,6 +468,10 @@ impl Analyzer {
             current_cancel_token: RwLock::new(None),
             merged_compiler_options: config.merged_compiler_options,
         }
+    }
+
+    pub fn batching_host(&self) -> Option<&Arc<crate::host::BatchingHost>> {
+        self.batching_host.as_ref()
     }
 
     pub fn merged_compiler_options(&self) -> &serde_json::Map<String, serde_json::Value> {
@@ -491,6 +544,20 @@ impl Analyzer {
         let mut token_write = self.current_cancel_token.write().unwrap();
         if let Some(token) = token_write.take() {
             token.cancel();
+        }
+
+        if !self.is_synchronous_host() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut handles_write = self.active_handles.write().unwrap();
+                let handles = std::mem::take(&mut *handles_write);
+                drop(handles_write);
+                // Dropping `RemoteHandle`s cancels spawned coordinator tasks immediately without
+                // blocking on parked host futures.
+                drop(handles);
+            }
+            self.engine.cancel_in_flight_queries();
+            return;
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -693,7 +760,13 @@ impl Analyzer {
                     .engine
                     .intern_module(&update.file_path, crate::host::IdKind::Virtual);
                 let path = PathBuf::from(&update.file_path);
-                if self.engine.is_synchronous_host() {
+                if let Some(batch_host) = &self.batching_host {
+                    batch_host.upsert_overlay(
+                        crate::host::ModuleId::from(update.file_path.as_str()),
+                        Arc::from(update.content.as_str()),
+                        None,
+                    );
+                } else if self.engine.is_synchronous_host() {
                     self.fs.upsert_file(path.clone(), update.content.clone());
                 }
                 paths_to_invalidate.push(update.file_path.clone());
@@ -704,6 +777,23 @@ impl Analyzer {
             }
 
             let raw_path = PathBuf::from(&update.file_path);
+            if let Some(batch_host) = &self.batching_host {
+                let norm_str = crate::fs::path_to_string(raw_path);
+                let norm_path = PathBuf::from(&norm_str);
+                let module_id = crate::host::ModuleId::from(norm_str.as_str());
+                let existed =
+                    self.engine.has_interned_path(&norm_path) || batch_host.has_overlay(&module_id);
+                files_created |= !existed;
+                batch_host.upsert_overlay(
+                    module_id,
+                    Arc::from(update.content.as_str()),
+                    crate::host::ModuleFormat::from_path(&norm_path),
+                );
+                paths_to_invalidate.push(norm_str);
+                self.invalidate_changed_path(&norm_path, &mut paths_to_invalidate);
+                continue;
+            }
+
             let path = self.fs.canonicalize(&raw_path).unwrap_or(raw_path);
             files_created |= self.fs.metadata(&path).is_err();
             config_changed |= path
@@ -737,7 +827,13 @@ impl Analyzer {
             let kind = self.resolve_update_kind(&update.file_path, update.id_kind);
             if kind == crate::host::IdKind::Virtual {
                 let path = PathBuf::from(&update.file_path);
-                self.fs.remove_virtual_file(&path);
+                if let Some(batch_host) = &self.batching_host {
+                    batch_host.remove_overlay(&crate::host::ModuleId::from(
+                        update.file_path.as_str(),
+                    ));
+                } else {
+                    self.fs.remove_virtual_file(&path);
+                }
                 self.resource_registry.unregister_ts_file(&path);
                 ts_paths_to_invalidate.push(update.file_path.clone());
                 if let Some(file_id) = self.engine.get_virtual_if_interned(&update.file_path) {
@@ -753,11 +849,18 @@ impl Analyzer {
             }
 
             let raw_path = PathBuf::from(&update.file_path);
-            let path = self.fs.canonicalize(&raw_path).unwrap_or(raw_path);
-            self.fs.remove_virtual_file(&path);
-            config_changed |= path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+            let path = if let Some(batch_host) = &self.batching_host {
+                let norm_str = crate::fs::path_to_string(raw_path);
+                batch_host.remove_overlay(&crate::host::ModuleId::from(norm_str.as_str()));
+                PathBuf::from(norm_str)
+            } else {
+                let canonical = self.fs.canonicalize(&raw_path).unwrap_or(raw_path);
+                self.fs.remove_virtual_file(&canonical);
+                config_changed |= canonical
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+                canonical
+            };
 
             if is_ts_file(&path) {
                 self.resource_registry.unregister_ts_file(&path);

@@ -34,6 +34,12 @@ enum WasmStreamEvent<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
     },
+    #[serde(rename = "hostRequests")]
+    HostRequests {
+        id: u32,
+        resolve: &'a [crate::host::WireResolveRequest],
+        load: &'a [crate::host::WireLoadRequest],
+    },
 }
 
 impl WasmAnalyzer {
@@ -97,12 +103,13 @@ impl WasmAnalyzer {
 
 #[wasm_bindgen]
 impl WasmAnalyzer {
-    /// Constructs an analyzer with an optional JavaScript filesystem bridge (`WasmHostFs`).
-    /// Without `host_fs`, only `virtualFiles` are visible.
+    /// Constructs an analyzer backed either by `BatchingHost` (`use_batching_host == Some(true)`)
+    /// or by `DefaultFsHost` over an optional JavaScript filesystem bridge (`WasmHostFs`).
     #[wasm_bindgen(constructor)]
     pub fn new(
         options_json: &str,
         host_fs: Option<crate::physical_fs::JsHostFs>,
+        use_batching_host: Option<bool>,
     ) -> Result<WasmAnalyzer, String> {
         let mut raw: serde_json::Value =
             serde_json::from_str(options_json).map_err(|e| e.to_string())?;
@@ -119,14 +126,22 @@ impl WasmAnalyzer {
             options.entry_points = Some(Vec::new());
         }
 
-        let physical: Arc<dyn crate::physical_fs::PhysicalFs> = match host_fs {
-            Some(host) => Arc::new(crate::physical_fs::HostFs::new(host)),
-            // `std::fs` compiles on wasm32 but fails at runtime, so without a host only virtual
-            // files exist.
-            None => Arc::new(crate::physical_fs::NoopFs),
+        let analyzer = if use_batching_host == Some(true) {
+            if host_fs.is_some() {
+                return Err("host_fs cannot be combined with BatchingHost".to_string());
+            }
+            let (analyzer, _) = Analyzer::new_core_with_batching_host(options)?;
+            analyzer
+        } else {
+            let physical: Arc<dyn crate::physical_fs::PhysicalFs> = match host_fs {
+                Some(host) => Arc::new(crate::physical_fs::HostFs::new(host)),
+                // `std::fs` compiles on wasm32 but fails at runtime, so without a host only virtual
+                // files exist.
+                None => Arc::new(crate::physical_fs::NoopFs),
+            };
+            Analyzer::new_core_with_physical_fs(options, physical)?
         };
 
-        let analyzer = Analyzer::new_core_with_physical_fs(options, physical)?;
         if let Some(refs) = entry_refs {
             analyzer.set_entry_points_refs_core(refs)?;
         }
@@ -221,6 +236,17 @@ impl WasmAnalyzer {
         serde_json::to_string(&res).map_err(|e| e.to_string())
     }
 
+    pub fn provide_host_results(&self, batch_id: u32, results_json: &str) -> Result<(), String> {
+        let Some(batch_host) = self.analyzer.batching_host() else {
+            return Err(
+                "provideHostResults requires an analyzer configured with a host".to_string(),
+            );
+        };
+        let results: crate::host::HostBatchResults =
+            serde_json::from_str(results_json).map_err(|e| e.to_string())?;
+        batch_host.provide_results(batch_id, results)
+    }
+
     pub fn is_synchronous_host(&self) -> bool {
         self.analyzer.is_synchronous_host()
     }
@@ -282,6 +308,18 @@ impl WasmAnalyzer {
             };
             return Some(event);
         }
+
+        if let Some(batch_host) = self.analyzer.batching_host() {
+            if let Some(batch) = batch_host.take_pending_batch() {
+                return serde_json::to_string(&WasmStreamEvent::HostRequests {
+                    id: batch.id,
+                    resolve: &batch.resolve,
+                    load: &batch.load,
+                })
+                .ok();
+            }
+        }
+
         None
     }
 }
